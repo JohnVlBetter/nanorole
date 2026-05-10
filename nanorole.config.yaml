@@ -1,0 +1,20 @@
+server:
+  host: 127.0.0.1
+  port: 8765
+
+model:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  name: deepseek-v4-pro
+  reasoning_effort: high
+  extra_body:
+    thinking:
+      type: enabled
+
+logging:
+  level: INFO
+  trace_requests: false
+
+paths:
+  logs_dir: .nanorole/logs
+  sessions_dir: .nanorole/sessions
