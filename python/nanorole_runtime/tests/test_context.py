@@ -105,3 +105,22 @@ def test_context_includes_relationship_state(tmp_path: Path) -> None:
     joined = "\n".join(item["content"] for item in messages)
     assert "calm check-ins" in joined
     assert "building trust slowly" in joined
+
+
+def test_context_includes_companion_safety_instruction(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    assembler = ContextAssembler(memory_store=MemoryStore(database))
+
+    messages, _ = assembler.build_messages(
+        role=role(),
+        user_id="local-user",
+        companion_id="companion",
+        history=[],
+        user_input="I need advice.",
+    )
+
+    system = messages[0]["content"]
+    assert "You are not a therapist, doctor, lawyer, or financial advisor." in system
+    assert "Respect user boundaries and corrections." in system
+    assert "Do not overuse long-term memories." in system

@@ -89,3 +89,114 @@ def test_parse_memory_extraction_accepts_valid_memory() -> None:
     parsed = parse_memory_extraction(raw)
 
     assert parsed.memories[0].content == "The user prefers gentle reminders."
+
+
+def test_temporary_mood_fixture_writes_no_long_term_memory(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    extraction = parse_memory_extraction({"memories": [], "archive_memory_ids": [], "relationship_patch": None})
+
+    written = store.apply_extraction(user_id="local-user", companion_id="companion", extraction=extraction)
+
+    assert written == []
+    assert store.list_memories(user_id="local-user", companion_id="companion") == []
+
+
+def test_sensitive_health_fixture_writes_no_memory_without_explicit_request(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    extraction = parse_memory_extraction({"memories": [], "archive_memory_ids": [], "relationship_patch": None})
+
+    written = store.apply_extraction(user_id="local-user", companion_id="companion", extraction=extraction)
+
+    assert written == []
+    assert store.list_memories(user_id="local-user", companion_id="companion") == []
+
+
+def test_explicit_preference_fixture_writes_memory(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    extraction = parse_memory_extraction(
+        {
+            "memories": [
+                {
+                    "type": "preference",
+                    "content": "The user prefers gentle reminders.",
+                    "importance": 0.7,
+                    "confidence": 0.9,
+                    "source_message_ids": ["m1"],
+                }
+            ],
+            "archive_memory_ids": [],
+            "relationship_patch": None,
+        }
+    )
+
+    written = store.apply_extraction(user_id="local-user", companion_id="companion", extraction=extraction)
+
+    assert [memory.content for memory in written] == ["The user prefers gentle reminders."]
+    assert store.list_memories(user_id="local-user", companion_id="companion")[0].source_message_ids == ["m1"]
+
+
+def test_explicit_boundary_fixture_writes_boundary_memory(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    extraction = parse_memory_extraction(
+        {
+            "memories": [
+                {
+                    "type": "boundary",
+                    "content": "The user does not want work stress saved as memory.",
+                    "importance": 1.0,
+                    "confidence": 1.0,
+                    "source_message_ids": ["m1"],
+                }
+            ],
+            "archive_memory_ids": [],
+            "relationship_patch": None,
+        }
+    )
+
+    written = store.apply_extraction(user_id="local-user", companion_id="companion", extraction=extraction)
+
+    assert written[0].type == "boundary"
+    assert written[0].content == "The user does not want work stress saved as memory."
+
+
+def test_correction_fixture_archives_old_memory_and_writes_new_one(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    old = store.create_memory(
+        user_id="local-user",
+        companion_id="companion",
+        memory_type="preference",
+        content="The user prefers direct pressure.",
+        importance=0.7,
+        confidence=0.7,
+        source_message_ids=["m1"],
+    )
+    extraction = parse_memory_extraction(
+        {
+            "memories": [
+                {
+                    "type": "preference",
+                    "content": "The user prefers gentle reminders.",
+                    "importance": 0.8,
+                    "confidence": 0.95,
+                    "source_message_ids": ["m2"],
+                }
+            ],
+            "archive_memory_ids": [old.memory_id],
+            "relationship_patch": None,
+        }
+    )
+
+    written = store.apply_extraction(user_id="local-user", companion_id="companion", extraction=extraction)
+
+    assert store.get_memory(old.memory_id).status == "archived"
+    assert [memory.content for memory in written] == ["The user prefers gentle reminders."]
