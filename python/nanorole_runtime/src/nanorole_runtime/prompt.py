@@ -34,6 +34,7 @@ def build_messages(
     history: list[ChatMessage],
     user_input: str,
 ) -> list[dict[str, str]]:
+    """Compatibility wrapper for callers that do not need durable memory context."""
     system = SYSTEM_TEMPLATE.format(
         role_id=role.id,
         name=role.name,
@@ -48,4 +49,3 @@ def build_messages(
     messages.extend({"role": item.role, "content": item.content} for item in history)
     messages.append({"role": "user", "content": user_input})
     return messages
-

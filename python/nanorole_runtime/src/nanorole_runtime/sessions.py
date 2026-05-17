@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from .config import AppConfig, redact_secrets
+from .context import ContextAssembler
 from .llm import ChatClient
-from .prompt import build_messages
+from .memory import MemoryStore
 from .roles import RolePackage, load_role_by_id
 from .sessions_types import ChatMessage
 from .storage import Database
@@ -146,7 +147,22 @@ class SessionManager:
         first_chunk_latency_ms: float | None = None
         first_token_latency_ms: float | None = None
         try:
-            messages = build_messages(role, session.history[:-1], message)
+            memory_store = MemoryStore(self.database)
+            assembler = ContextAssembler(memory_store=memory_store)
+            messages, used_memories = assembler.build_messages(
+                role=role,
+                user_id=DEFAULT_USER_ID,
+                companion_id=role.id,
+                history=session.history[:-1],
+                user_input=message,
+            )
+            used_memory_ids = [memory.memory_id for memory in used_memories]
+            memory_store.mark_used(used_memory_ids)
+            self._record(
+                session,
+                "memory_retrieval",
+                {"session_id": session_id, "role_id": session.role_id, "memory_ids": used_memory_ids},
+            )
             if session.config.logging.trace_requests:
                 self._write_log(
                     "trace_request",

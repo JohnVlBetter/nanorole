@@ -150,6 +150,17 @@ class MemoryStore:
     def delete_memory(self, memory_id: str) -> MemoryRecord:
         return self.update_memory(memory_id, status="deleted")
 
+    def mark_used(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        now = utc_now()
+        with self.database.connect() as connection:
+            for memory_id in memory_ids:
+                connection.execute(
+                    "update memories set last_used_at = ?, use_count = use_count + 1 where id = ?",
+                    (now, memory_id),
+                )
+
     def _row_to_memory(self, row) -> MemoryRecord:
         sources = self.database.fetch_all(
             "select message_id from memory_sources where memory_id = ? order by message_id",
