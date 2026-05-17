@@ -12,6 +12,20 @@ from .storage import Database
 
 VALID_MEMORY_TYPES = {"profile", "preference", "episodic", "relationship", "boundary"}
 VALID_MEMORY_STATUS = {"active", "archived", "deleted"}
+SCORE_LABELS = {
+    "very low": 0.2,
+    "low": 0.3,
+    "medium": 0.6,
+    "moderate": 0.6,
+    "high": 0.8,
+    "very high": 0.95,
+    "低": 0.3,
+    "中": 0.6,
+    "中等": 0.6,
+    "一般": 0.6,
+    "高": 0.8,
+    "很高": 0.95,
+}
 
 
 def utc_now() -> str:
@@ -484,9 +498,22 @@ def _required_string(item: dict[Any, Any], key: str) -> str:
 
 def _required_float(item: dict[Any, Any], key: str) -> float:
     value = item.get(key)
-    if not isinstance(value, (int, float)):
-        raise ValueError(f"{key} must be a number")
-    return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in SCORE_LABELS:
+            return SCORE_LABELS[normalized]
+        if normalized.endswith("%"):
+            try:
+                return float(normalized.removesuffix("%")) / 100
+            except ValueError:
+                pass
+        try:
+            return float(normalized)
+        except ValueError:
+            pass
+    raise ValueError(f"{key} must be a number")
 
 
 def _validate_score(key: str, value: float) -> None:

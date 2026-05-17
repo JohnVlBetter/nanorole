@@ -91,6 +91,27 @@ def test_parse_memory_extraction_accepts_valid_memory() -> None:
     assert parsed.memories[0].content == "The user prefers gentle reminders."
 
 
+def test_parse_memory_extraction_normalizes_common_score_labels() -> None:
+    raw = {
+        "memories": [
+            {
+                "type": "preference",
+                "content": "The user prefers cola.",
+                "importance": "high",
+                "confidence": "medium",
+                "source_message_ids": ["m1"],
+            }
+        ],
+        "archive_memory_ids": [],
+        "relationship_patch": None,
+    }
+
+    parsed = parse_memory_extraction(raw)
+
+    assert parsed.memories[0].importance == 0.8
+    assert parsed.memories[0].confidence == 0.6
+
+
 def test_temporary_mood_fixture_writes_no_long_term_memory(tmp_path: Path) -> None:
     database = Database(tmp_path / "nanorole.sqlite3")
     database.initialize()
