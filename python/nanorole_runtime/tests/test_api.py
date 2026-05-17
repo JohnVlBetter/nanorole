@@ -55,9 +55,10 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
     session_id = created.json()["sessionId"]
     streamed = client.post(
         f"/v1/sessions/{session_id}/messages:stream",
-        json={"message": "Hello"},
+        json={"message": "Hello", "inputModality": "text", "emotionLabel": "curious", "audioRef": "mic://sample"},
     )
     preview = client.get(f"/v1/sessions/{session_id}/context-preview?userInput=Next")
+    messages = client.get(f"/v1/sessions/{session_id}/messages")
     exported = client.get(f"/v1/sessions/{session_id}/export")
 
     assert health.json() == {"status": "ok", "service": "nanorole-runtime"}
@@ -71,6 +72,19 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
     assert preview.status_code == 200
     assert preview.json()["sessionId"] == session_id
     assert preview.json()["messages"][-1] == {"role": "user", "content": "Next"}
+    assert messages.json()["messages"][0] == {
+        "messageId": messages.json()["messages"][0]["messageId"],
+        "role": "user",
+        "content": "Hello",
+        "speakerId": "user",
+        "inputModality": "text",
+        "outputModality": None,
+        "emotionLabel": "curious",
+        "audioRef": "mic://sample",
+    }
+    assert messages.json()["messages"][1]["speakerId"] == "clockwork-sage"
+    assert messages.json()["messages"][1]["inputModality"] is None
+    assert messages.json()["messages"][1]["outputModality"] == "text"
     assert exported.status_code == 200
     assert '"type": "assistant_message"' in exported.text
 

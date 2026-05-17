@@ -62,7 +62,7 @@ export const CHAT_HTML = `<!doctype html>
     <main>
       <header>
         <div><h1 id="heading">未开始</h1><div class="session" id="session">选择角色并开始会话</div></div>
-        <div class="actions"><a id="memory-link" href="/memories" target="_blank" rel="noreferrer">记忆</a><a href="/logs" target="_blank" rel="noreferrer">打开日志</a></div>
+        <div class="actions"><a id="memory-link" href="/memories" target="_blank" rel="noreferrer">记忆</a><a id="context-link" href="/memories" target="_blank" rel="noreferrer">Context Preview</a><a href="/logs" target="_blank" rel="noreferrer">打开日志</a></div>
       </header>
       <section class="messages" id="messages"><div class="empty">网页 demo 由 TS 服务提供，Python 只负责 core runtime。</div></section>
       <form id="composer"><textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea><button class="primary" id="send" disabled>发送</button></form>
@@ -82,6 +82,7 @@ export const CHAT_HTML = `<!doctype html>
     const input = document.querySelector("#input");
     const send = document.querySelector("#send");
     const memoryLink = document.querySelector("#memory-link");
+    const contextLink = document.querySelector("#context-link");
     let roles = [];
     let sessions = [];
     let selectedRole = null;
@@ -178,6 +179,7 @@ export const CHAT_HTML = `<!doctype html>
       if (selectedRole) params.set("companionId", selectedRole.id);
       if (sessionId) params.set("sessionId", sessionId);
       memoryLink.href = "/memories?" + params.toString();
+      contextLink.href = "/memories?" + params.toString();
     }
     async function loadRoles() {
       try {

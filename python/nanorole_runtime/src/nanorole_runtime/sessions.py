@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +15,7 @@ from .roles import RolePackage, load_role_by_id
 from .sessions_types import ChatMessage
 from .storage import Database
 from .summaries import SummaryStore, generate_session_summary, should_update_summary
+from .turns import CompanionTurnPipeline
 
 
 DEFAULT_USER_ID = "local-user"
@@ -166,125 +166,47 @@ class SessionManager:
             ],
         }
 
-    async def stream_message(self, session_id: str, message: str) -> AsyncIterator[StreamEvent]:
+    async def stream_message(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        speaker_id: str | None = None,
+        input_modality: str | None = "text",
+        emotion_label: str | None = None,
+        audio_ref: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         session = self.get_session(session_id)
         role = self._resolve_role(session.role_id)
-        user_message = self._persist_message(session.session_id, "user", message)
-        session.history.append(user_message)
-        self._record(session, "user_message", {"session_id": session_id, "role_id": session.role_id, "content": message})
-
-        assistant_parts: list[str] = []
-        messages: list[dict[str, str]] = []
-        started = time.perf_counter()
-        first_chunk_latency_ms: float | None = None
-        first_token_latency_ms: float | None = None
-        try:
-            memory_store = MemoryStore(self.database)
-            assembler = ContextAssembler(memory_store=memory_store)
-            messages, used_memories = assembler.build_messages(
-                role=role,
-                user_id=DEFAULT_USER_ID,
-                companion_id=role.id,
-                history=session.history[:-1],
-                user_input=message,
-                session_summary=self._session_summary_text(session.session_id),
-            )
-            used_memory_ids = [memory.memory_id for memory in used_memories]
-            memory_store.mark_used(used_memory_ids)
-            self._record(
-                session,
-                "memory_retrieval",
-                {"session_id": session_id, "role_id": session.role_id, "memory_ids": used_memory_ids},
-            )
-            if session.config.logging.trace_requests:
-                self._write_log(
-                    "trace_request",
-                    {
-                        "session_id": session_id,
-                        "role_id": session.role_id,
-                        "messages": messages,
-                        "model": session.config.model.name,
-                    },
-                )
-
-            def set_first_chunk_latency(latency_ms: float) -> None:
-                nonlocal first_chunk_latency_ms
-                if first_chunk_latency_ms is None:
-                    first_chunk_latency_ms = round(latency_ms, 3)
-
-            def set_first_token_latency(latency_ms: float) -> None:
-                nonlocal first_token_latency_ms
-                if first_token_latency_ms is None:
-                    first_token_latency_ms = round(latency_ms, 3)
-
-            async for chunk in self.client.stream_chat(
-                messages=messages,
-                config=session.config,
-                role=role,
-                on_first_chunk=set_first_chunk_latency,
-                on_first_token=set_first_token_latency,
-            ):
-                assistant_parts.append(chunk)
-                self._record(session, "assistant_delta", {"session_id": session_id, "role_id": session.role_id, "delta": chunk})
-                yield StreamEvent("token", {"delta": chunk})
-
-            assistant_message = "".join(assistant_parts)
-            assistant_chat_message = self._persist_message(session.session_id, "assistant", assistant_message)
-            session.history.append(assistant_chat_message)
-            self._record(session, "assistant_message", {"session_id": session_id, "role_id": session.role_id, "content": assistant_message})
-            self._schedule_memory_extraction(
-                session=session,
-                role=role,
-                user_message=user_message,
-                user_text=message,
-                assistant_message=assistant_chat_message,
-                assistant_text=assistant_message,
-            )
-            self._schedule_summary_update(session=session)
-            self._write_log(
-                "request_completed",
-                {
-                    "session_id": session_id,
-                    "role_id": session.role_id,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-                    "first_chunk_latency_ms": first_chunk_latency_ms,
-                    "first_token_latency_ms": first_token_latency_ms,
-                    "token_count": len(assistant_parts),
-                    "input": {
-                        "user_message": message,
-                        "messages": messages,
-                    },
-                    "output": {
-                        "message": assistant_message,
-                        "chunks": assistant_parts,
-                    },
-                    "error": None,
-                },
-            )
-            yield StreamEvent("final", {"message": assistant_message})
-        except Exception as error:
-            self._record(session, "error", {"session_id": session_id, "role_id": session.role_id, "message": str(error)})
-            self._write_log(
-                "request_failed",
-                {
-                    "session_id": session_id,
-                    "role_id": session.role_id,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-                    "first_chunk_latency_ms": first_chunk_latency_ms,
-                    "first_token_latency_ms": first_token_latency_ms,
-                    "token_count": len(assistant_parts),
-                    "input": {
-                        "user_message": message,
-                        "messages": messages,
-                    },
-                    "output": {
-                        "message": "".join(assistant_parts),
-                        "chunks": assistant_parts,
-                    },
-                    "error": str(error),
-                },
-            )
-            yield StreamEvent("error", {"message": str(error)})
+        pipeline = CompanionTurnPipeline(
+            session_id=session.session_id,
+            role=role,
+            config=session.config,
+            client=self.client,
+            history=session.history,
+            user_id=DEFAULT_USER_ID,
+            companion_id=role.id,
+            session_summary=self._session_summary_text(session.session_id),
+            memory_store=MemoryStore(self.database),
+            persist_message=lambda message_role, content, **metadata: self._persist_message(
+                session.session_id,
+                message_role,
+                content,
+                **metadata,
+            ),
+            record_event=lambda event_type, data: self._record(session, event_type, data),
+            write_log=self._write_log,
+            schedule_memory_extraction=lambda **kwargs: self._schedule_memory_extraction(session=session, role=role, **kwargs),
+            schedule_summary_update=lambda: self._schedule_summary_update(session=session),
+        )
+        async for event in pipeline.stream(
+            user_input=message,
+            speaker_id=speaker_id,
+            input_modality=input_modality,
+            emotion_label=emotion_label,
+            audio_ref=audio_ref,
+        ):
+            yield StreamEvent(event.type, event.data)
 
     def export_session(self, session_id: str) -> str:
         session = self.get_session(session_id)
@@ -516,7 +438,18 @@ class SessionManager:
                 ),
             )
 
-    def _persist_message(self, session_id: str, role: str, content: str) -> ChatMessage:
+    def _persist_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        speaker_id: str | None = None,
+        input_modality: str | None = None,
+        output_modality: str | None = None,
+        emotion_label: str | None = None,
+        audio_ref: str | None = None,
+    ) -> ChatMessage:
         now = self._now()
         message_id = uuid.uuid4().hex
         with self.database.connect() as connection:
@@ -527,10 +460,24 @@ class SessionManager:
             ordinal = int(row["ordinal"])
             connection.execute(
                 """
-                insert into messages (id, session_id, role, content, created_at, ordinal)
-                values (?, ?, ?, ?, ?, ?)
+                insert into messages (
+                  id, session_id, role, content, created_at, ordinal,
+                  speaker_id, input_modality, output_modality, emotion_label, audio_ref
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, session_id, role, content, now, ordinal),
+                (
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                    now,
+                    ordinal,
+                    _clean_optional(speaker_id),
+                    _clean_optional(input_modality),
+                    _clean_optional(output_modality),
+                    _clean_optional(emotion_label),
+                    _clean_optional(audio_ref),
+                ),
             )
             connection.execute(
                 """
@@ -543,7 +490,16 @@ class SessionManager:
         if session_id in self._sessions:
             self._sessions[session_id].updated_at = now
             self._sessions[session_id].last_message_at = now
-        return ChatMessage(role=role, content=content, message_id=message_id)
+        return ChatMessage(
+            role=role,
+            content=content,
+            message_id=message_id,
+            speaker_id=_clean_optional(speaker_id),
+            input_modality=_clean_optional(input_modality),
+            output_modality=_clean_optional(output_modality),
+            emotion_label=_clean_optional(emotion_label),
+            audio_ref=_clean_optional(audio_ref),
+        )
 
     def _load_session(self, session_id: str) -> SessionState:
         row = self.database.fetch_one("select * from sessions where id = ? and status != 'deleted'", (session_id,))
@@ -576,7 +532,7 @@ class SessionManager:
     def _load_messages(self, session_id: str) -> list[ChatMessage]:
         rows = self.database.fetch_all(
             """
-            select id, role, content
+            select id, role, content, speaker_id, input_modality, output_modality, emotion_label, audio_ref
             from messages
             where session_id = ?
             order by ordinal
@@ -584,7 +540,16 @@ class SessionManager:
             (session_id,),
         )
         return [
-            ChatMessage(message_id=str(row["id"]), role=str(row["role"]), content=str(row["content"]))
+            ChatMessage(
+                message_id=str(row["id"]),
+                role=str(row["role"]),
+                content=str(row["content"]),
+                speaker_id=str(row["speaker_id"]) if row["speaker_id"] is not None else None,
+                input_modality=str(row["input_modality"]) if row["input_modality"] is not None else None,
+                output_modality=str(row["output_modality"]) if row["output_modality"] is not None else None,
+                emotion_label=str(row["emotion_label"]) if row["emotion_label"] is not None else None,
+                audio_ref=str(row["audio_ref"]) if row["audio_ref"] is not None else None,
+            )
             for row in rows
         ]
 
@@ -594,6 +559,13 @@ class SessionManager:
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 __all__ = [

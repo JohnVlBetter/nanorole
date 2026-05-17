@@ -76,6 +76,23 @@ describe("demo server", () => {
     expect(html).not.toContain("await startSession();");
   });
 
+  test("chat and log pages expose readable Chinese debug copy", async () => {
+    const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
+    const baseUrl = await listen(demo);
+
+    const chat = await fetch(`${baseUrl}/chat`).then((response) => response.text());
+    const logs = await fetch(`${baseUrl}/logs`).then((response) => response.text());
+
+    expect(chat).toContain("正在读取角色");
+    expect(chat).toContain("开始会话");
+    expect(chat).toContain("Context Preview");
+    expect(chat).not.toContain("寮€");
+    expect(logs).toContain("返回聊天");
+    expect(logs).toContain("用户输入");
+    expect(logs).toContain("原始 JSON");
+    expect(logs).not.toContain("鏃");
+  });
+
   test("proxies session creation and message streams to Python core", async () => {
     const runtime = createServer(async (request: IncomingMessage, response: ServerResponse) => {
       if (request.url === "/v1/sessions" && request.method === "POST") {

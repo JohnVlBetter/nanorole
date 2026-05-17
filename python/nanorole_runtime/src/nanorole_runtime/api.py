@@ -20,6 +20,10 @@ class CreateSessionRequest(BaseModel):
 
 class StreamMessageRequest(BaseModel):
     message: str
+    speakerId: str | None = None
+    inputModality: str | None = "text"
+    emotionLabel: str | None = None
+    audioRef: str | None = None
 
 
 class UpdateSessionRequest(BaseModel):
@@ -99,7 +103,7 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"session not found: {session_id}") from error
         return {
             "messages": [
-                {"messageId": message.message_id, "role": message.role, "content": message.content}
+                _message_response(message)
                 for message in session.history
             ]
         }
@@ -167,7 +171,14 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
     async def stream_message(session_id: str, request: StreamMessageRequest) -> StreamingResponse:
         async def events():
             try:
-                async for event in manager.stream_message(session_id, request.message):
+                async for event in manager.stream_message(
+                    session_id,
+                    request.message,
+                    speaker_id=request.speakerId,
+                    input_modality=request.inputModality,
+                    emotion_label=request.emotionLabel,
+                    audio_ref=request.audioRef,
+                ):
                     yield _sse(event.type, event.data)
             except SessionNotFoundError as error:
                 yield _sse("error", {"message": f"session not found: {session_id}"})
@@ -206,6 +217,19 @@ def _session_detail(session) -> dict[str, str | None]:
         **_session_summary(session),
         "roleVersion": session.role_version,
         "opening": session.role_opening,
+    }
+
+
+def _message_response(message) -> dict[str, str | None]:
+    return {
+        "messageId": message.message_id,
+        "role": message.role,
+        "content": message.content,
+        "speakerId": message.speaker_id,
+        "inputModality": message.input_modality,
+        "outputModality": message.output_modality,
+        "emotionLabel": message.emotion_label,
+        "audioRef": message.audio_ref,
     }
 
 

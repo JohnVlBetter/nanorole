@@ -102,9 +102,12 @@ async def test_sessions_keep_history_and_exports_isolated(tmp_path: Path, role: 
     exported = manager.export_session(first.session_id)
 
     assert '"type": "session_started"' in exported
+    assert '"type": "turn_started"' in exported
     assert '"type": "user_message"' in exported
+    assert '"type": "context_built"' in exported
     assert '"type": "assistant_delta"' in exported
     assert '"type": "assistant_message"' in exported
+    assert '"type": "turn_completed"' in exported
     assert second.session_id not in exported
 
 
@@ -270,6 +273,43 @@ async def test_do_not_remember_this_skips_memory_extraction(tmp_path: Path, role
     session = manager.create_session(role.id)
 
     _ = [event async for event in manager.stream_message(session.session_id, "Do not remember this: I like cola.")]
+    await asyncio.sleep(0.05)
+
+    store = MemoryStore(manager.database)
+    assert client.extraction_calls == 0
+    assert store.list_memories(user_id="local-user", companion_id=role.id) == []
+
+
+async def test_chinese_do_not_remember_skips_memory_extraction(tmp_path: Path, role: RolePackage) -> None:
+    class PrivacyClient(ChatClient):
+        def __init__(self) -> None:
+            self.extraction_calls = 0
+
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            yield "明白"
+
+        async def complete_json(self, *, messages, config):
+            self.extraction_calls += 1
+            return {
+                "memories": [
+                    {
+                        "type": "preference",
+                        "content": "The user likes cola.",
+                        "importance": 0.8,
+                        "confidence": 0.9,
+                        "source_message_ids": ["m1"],
+                    }
+                ],
+                "archive_memory_ids": [],
+                "relationship_patch": None,
+            }
+
+    create_role_file(tmp_path, role)
+    client = PrivacyClient()
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=client)
+    session = manager.create_session(role.id)
+
+    _ = [event async for event in manager.stream_message(session.session_id, "不要记住这个：我喜欢可乐。")]
     await asyncio.sleep(0.05)
 
     store = MemoryStore(manager.database)

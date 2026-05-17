@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
-SCHEMA = """
+SCHEMA_MIGRATIONS_TABLE = """
+create table if not exists schema_migrations (
+  id text primary key,
+  applied_at text not null
+);
+"""
+
+INITIAL_SCHEMA = """
 create table if not exists users (
   id text primary key,
   display_name text not null,
@@ -102,6 +110,33 @@ create table if not exists relationship_states (
 );
 """
 
+MESSAGE_METADATA_COLUMNS = {
+    "speaker_id": "speaker_id text",
+    "input_modality": "input_modality text",
+    "output_modality": "output_modality text",
+    "emotion_label": "emotion_label text",
+    "audio_ref": "audio_ref text",
+}
+
+Migration = tuple[str, Callable[[sqlite3.Connection], None]]
+
+
+def _apply_initial_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(INITIAL_SCHEMA)
+
+
+def _apply_message_metadata(connection: sqlite3.Connection) -> None:
+    existing_columns = _column_names(connection, "messages")
+    for column_name, definition in MESSAGE_METADATA_COLUMNS.items():
+        if column_name not in existing_columns:
+            connection.execute(f"alter table messages add column {definition}")
+
+
+MIGRATIONS: tuple[Migration, ...] = (
+    ("0001_initial_schema", _apply_initial_schema),
+    ("0002_message_metadata", _apply_message_metadata),
+)
+
 
 class Database:
     def __init__(self, path: str | Path) -> None:
@@ -116,7 +151,19 @@ class Database:
 
     def initialize(self) -> None:
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
+            connection.executescript(SCHEMA_MIGRATIONS_TABLE)
+            applied = {
+                str(row["id"])
+                for row in connection.execute("select id from schema_migrations").fetchall()
+            }
+            for migration_id, apply_migration in MIGRATIONS:
+                if migration_id in applied:
+                    continue
+                apply_migration(connection)
+                connection.execute(
+                    "insert into schema_migrations (id, applied_at) values (?, ?)",
+                    (migration_id, datetime.now(timezone.utc).isoformat()),
+                )
 
     def table_names(self) -> set[str]:
         with self.connect() as connection:
@@ -134,3 +181,8 @@ class Database:
     def fetch_one(self, sql: str, parameters: Iterable[Any] = ()) -> sqlite3.Row | None:
         with self.connect() as connection:
             return connection.execute(sql, tuple(parameters)).fetchone()
+
+
+def _column_names(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = connection.execute(f"pragma table_info({table_name})").fetchall()
+    return {str(row["name"]) for row in rows}

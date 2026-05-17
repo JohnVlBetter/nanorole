@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,9 +24,37 @@ SCORE_LABELS = {
     "中": 0.6,
     "中等": 0.6,
     "一般": 0.6,
+    "较高": 0.8,
     "高": 0.8,
     "很高": 0.95,
+    "非常高": 0.95,
 }
+EXPLICIT_MEMORY_INTENT_PHRASES = (
+    "记住",
+    "记得",
+    "以后给我",
+    "以后帮我",
+    "下次给我",
+    "下次帮我",
+    "remember",
+    "please remember",
+)
+SENSITIVE_DETERMINISTIC_MEMORY_MARKERS = (
+    "密码",
+    "口令",
+    "验证码",
+    "身份证",
+    "银行卡",
+    "信用卡",
+    "住址",
+    "地址",
+    "api key",
+    "password",
+    "secret",
+    "token",
+    "credit card",
+    "ssn",
+)
 
 
 def utc_now() -> str:
@@ -157,6 +186,10 @@ class MemoryExtractor:
     ) -> MemoryExtraction:
         if _requests_no_memory(user_message):
             return MemoryExtraction(memories=[], archive_memory_ids=[], relationship_patch=None)
+        explicit_memory = _explicit_memory_from_user_request(
+            user_message=user_message,
+            user_message_id=user_message_id,
+        )
         existing = self.store.list_memories(user_id=user_id, companion_id=companion_id)
         existing_text = "\n".join(f"- {memory.memory_id}: [{memory.type}] {memory.content}" for memory in existing)
         if not existing_text:
@@ -190,7 +223,13 @@ class MemoryExtractor:
             ],
             config=self.config,
         )
-        return parse_memory_extraction(raw)
+        try:
+            extraction = parse_memory_extraction(raw)
+        except ValueError:
+            if explicit_memory is not None:
+                return MemoryExtraction(memories=[explicit_memory], archive_memory_ids=[], relationship_patch=None)
+            raise
+        return _with_explicit_memory_floor(extraction, explicit_memory)
 
 
 class MemoryStore:
@@ -536,23 +575,79 @@ def _required_string(item: dict[Any, Any], key: str) -> str:
 
 
 def _required_float(item: dict[Any, Any], key: str) -> float:
-    value = item.get(key)
+    if key not in item:
+        raise ValueError(f"{key} must be a number")
+    score = _score_from_value(item.get(key))
+    if score is not None:
+        return score
+    # LLMs often return advisory score labels like "important", "明确",
+    # {"label": "high"}, or "high (explicit user request)" despite the
+    # JSON contract asking for numbers. The memory content and sources are
+    # the safety-critical fields; score parsing should not drop extraction.
+    return 0.6
+
+
+def _score_from_value(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in SCORE_LABELS:
-            return SCORE_LABELS[normalized]
-        if normalized.endswith("%"):
-            try:
-                return float(normalized.removesuffix("%")) / 100
-            except ValueError:
-                pass
-        try:
-            return float(normalized)
-        except ValueError:
-            pass
-    raise ValueError(f"{key} must be a number")
+        return _score_from_text(value)
+    if isinstance(value, dict):
+        preferred_keys = ("value", "score", "rating", "label", "level", "importance", "confidence")
+        for key in preferred_keys:
+            if key in value:
+                score = _score_from_value(value[key])
+                if score is not None:
+                    return score
+        for nested_value in value.values():
+            score = _score_from_value(nested_value)
+            if score is not None:
+                return score
+        return None
+    if isinstance(value, list):
+        for nested_value in value:
+            score = _score_from_value(nested_value)
+            if score is not None:
+                return score
+    return None
+
+
+def _score_from_text(value: str) -> float | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized in SCORE_LABELS:
+        return SCORE_LABELS[normalized]
+    numeric_score = _numeric_score_from_text(normalized)
+    if numeric_score is not None:
+        return numeric_score
+    return _score_from_label_text(normalized)
+
+
+def _numeric_score_from_text(value: str) -> float | None:
+    match = re.search(r"(?<!\d)(0(?:\.\d+)?|1(?:\.0+)?|100(?:\.0+)?%|[1-9]\d?(?:\.\d+)?%)", value)
+    if match is None:
+        return None
+    text = match.group(1)
+    if text.endswith("%"):
+        return float(text.removesuffix("%")) / 100
+    return float(text)
+
+
+def _score_from_label_text(value: str) -> float | None:
+    if not value:
+        return None
+    if any(label in value for label in ("very high", "非常高", "很高")):
+        return 0.95
+    if any(label in value for label in ("high", "较高", "高")):
+        return 0.8
+    if any(label in value for label in ("medium", "moderate", "中等", "中", "一般")):
+        return 0.6
+    if any(label in value for label in ("very low", "low", "较低", "低")):
+        return 0.3
+    return None
 
 
 def _validate_score(key: str, value: float) -> None:
@@ -599,6 +694,52 @@ def _validate_source_message_ids(source_message_ids: list[str], *, field_name: s
     if not cleaned or len(cleaned) != len(source_message_ids):
         raise ValueError(f"{field_name} must include at least one source message id")
     return list(dict.fromkeys(cleaned))
+
+
+def _explicit_memory_from_user_request(*, user_message: str, user_message_id: str) -> ExtractedMemory | None:
+    content = user_message.strip()
+    if not content:
+        return None
+    if not _has_explicit_memory_intent(content):
+        return None
+    if _has_sensitive_deterministic_marker(content):
+        return None
+    return ExtractedMemory(
+        type="preference",
+        content=f"用户明确要求记住：{content}",
+        importance=0.85,
+        confidence=0.9,
+        source_message_ids=[user_message_id],
+    )
+
+
+def _with_explicit_memory_floor(
+    extraction: MemoryExtraction,
+    explicit_memory: ExtractedMemory | None,
+) -> MemoryExtraction:
+    if explicit_memory is None:
+        return extraction
+    source_id = explicit_memory.source_message_ids[0]
+    # Explicit "remember/记得" requests are a deterministic floor. The model can
+    # still contribute relationship/archive updates, but schema or scoring drift
+    # must not make the user's explicit directive disappear.
+    if any(source_id in memory.source_message_ids for memory in extraction.memories):
+        return extraction
+    return MemoryExtraction(
+        memories=[explicit_memory, *extraction.memories],
+        archive_memory_ids=extraction.archive_memory_ids,
+        relationship_patch=extraction.relationship_patch,
+    )
+
+
+def _has_explicit_memory_intent(message: str) -> bool:
+    normalized = message.lower()
+    return any(phrase in normalized for phrase in EXPLICIT_MEMORY_INTENT_PHRASES)
+
+
+def _has_sensitive_deterministic_marker(message: str) -> bool:
+    normalized = message.lower()
+    return any(marker in normalized for marker in SENSITIVE_DETERMINISTIC_MEMORY_MARKERS)
 
 
 def _requests_no_memory(message: str) -> bool:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nanorole_runtime.memory import MemoryStore, parse_memory_extraction
+from nanorole_runtime.config import load_config
+from nanorole_runtime.memory import MemoryExtractor, MemoryStore, parse_memory_extraction
 from nanorole_runtime.storage import Database
 
 
@@ -154,6 +155,103 @@ def test_parse_memory_extraction_normalizes_common_score_labels() -> None:
 
     assert parsed.memories[0].importance == 0.8
     assert parsed.memories[0].confidence == 0.6
+
+
+def test_parse_memory_extraction_normalizes_chinese_score_variants() -> None:
+    raw = {
+        "memories": [
+            {
+                "type": "preference",
+                "content": "The user wants souffle prepared first on future visits.",
+                "importance": "较高",
+                "confidence": "高（用户明确要求记住）",
+                "source_message_ids": ["m1"],
+            }
+        ],
+        "archive_memory_ids": [],
+        "relationship_patch": None,
+    }
+
+    parsed = parse_memory_extraction(raw)
+
+    assert parsed.memories[0].importance == 0.8
+    assert parsed.memories[0].confidence == 0.8
+
+
+def test_parse_memory_extraction_tolerates_llm_score_annotations() -> None:
+    raw = {
+        "memories": [
+            {
+                "type": "preference",
+                "content": "The user wants souffle prepared first on future visits.",
+                "importance": "0.8 - explicit request",
+                "confidence": "确认：用户明确要求记住",
+                "source_message_ids": ["m1"],
+            }
+        ],
+        "archive_memory_ids": [],
+        "relationship_patch": None,
+    }
+
+    parsed = parse_memory_extraction(raw)
+
+    assert parsed.memories[0].importance == 0.8
+    assert parsed.memories[0].confidence == 0.6
+
+
+def test_parse_memory_extraction_tolerates_structured_score_labels() -> None:
+    raw = {
+        "memories": [
+            {
+                "type": "preference",
+                "content": "The user wants cola prepared on future visits.",
+                "importance": {"label": "high", "reason": "explicit request"},
+                "confidence": {"value": "0.7"},
+                "source_message_ids": ["m1"],
+            }
+        ],
+        "archive_memory_ids": [],
+        "relationship_patch": None,
+    }
+
+    parsed = parse_memory_extraction(raw)
+
+    assert parsed.memories[0].importance == 0.8
+    assert parsed.memories[0].confidence == 0.7
+
+
+async def test_memory_extractor_adds_explicit_remember_request_when_model_omits_memory(tmp_path: Path) -> None:
+    class OmittingClient:
+        async def complete_json(self, *, messages, config):
+            return {
+                "memories": [],
+                "archive_memory_ids": [],
+                "relationship_patch": None,
+            }
+
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    extractor = MemoryExtractor(
+        client=OmittingClient(),
+        config=load_config(repo_root=tmp_path),
+        store=MemoryStore(database),
+    )
+
+    extraction = await extractor.extract_after_turn(
+        user_id="local-user",
+        companion_id="neko-maid",
+        user_message_id="m1",
+        user_message="以后记得给我准备舒芙蕾和可乐",
+        assistant_message_id="a1",
+        assistant_message="记住了。",
+    )
+
+    assert len(extraction.memories) == 1
+    memory = extraction.memories[0]
+    assert memory.type == "preference"
+    assert "舒芙蕾" in memory.content
+    assert "可乐" in memory.content
+    assert memory.source_message_ids == ["m1"]
 
 
 def test_temporary_mood_fixture_writes_no_long_term_memory(tmp_path: Path) -> None:
