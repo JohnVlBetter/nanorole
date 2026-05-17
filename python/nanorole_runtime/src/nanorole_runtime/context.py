@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .memory import MemoryRecord, MemoryStore
+from .memory import MemoryRecord, MemoryStore, RelationshipState
 from .roles import RolePackage
 from .sessions_types import ChatMessage
 
@@ -31,7 +31,8 @@ class ContextAssembler:
             companion_id=companion_id,
             query=f"{self._recent_text(history)}\n{user_input}",
         )
-        system = self._system_prompt(role=role, memories=memories)
+        relationship = self.memory_store.get_relationship_state(user_id=user_id, companion_id=companion_id)
+        system = self._system_prompt(role=role, memories=memories, relationship=relationship)
         messages = [{"role": "system", "content": system}]
         messages.extend({"role": item.role, "content": item.content} for item in history[-20:])
         messages.append({"role": "user", "content": user_input})
@@ -53,10 +54,17 @@ class ContextAssembler:
         overuse_penalty = min(memory.use_count * 0.1, 0.8)
         return lexical + type_bonus + importance + confidence - overuse_penalty
 
-    def _system_prompt(self, *, role: RolePackage, memories: list[MemoryRecord]) -> str:
+    def _system_prompt(
+        self,
+        *,
+        role: RolePackage,
+        memories: list[MemoryRecord],
+        relationship: RelationshipState | None,
+    ) -> str:
         memory_text = "\n".join(f"- [{memory.type}] {memory.content}" for memory in memories)
         if not memory_text:
             memory_text = "- No relevant long-term memories selected."
+        relationship_text = self._relationship_text(relationship)
         goals = "\n".join(f"- {goal}" for goal in role.goals)
         safety_rules = "\n".join(f"- {rule}" for rule in role.safety_rules) if role.safety_rules else "- Follow general safety constraints."
         return f"""You are running an emotional companion character for Nanorole.
@@ -85,9 +93,24 @@ Goals:
 Safety Rules:
 {safety_rules}
 
+Relationship state:
+{relationship_text}
+
 Long-term memory facts. Treat these as fallible notes controlled by the user:
 {memory_text}
 """
 
     def _recent_text(self, history: list[ChatMessage]) -> str:
         return "\n".join(message.content for message in history[-6:])
+
+    def _relationship_text(self, relationship: RelationshipState | None) -> str:
+        if relationship is None:
+            return "No relationship state recorded yet."
+        lines = [relationship.summary or "No relationship summary recorded yet."]
+        lines.append(f"Familiarity: {relationship.familiarity:.2f}")
+        lines.append(f"Trust: {relationship.trust:.2f}")
+        if relationship.preferred_address:
+            lines.append(f"Preferred address: {relationship.preferred_address}")
+        if relationship.communication_style:
+            lines.append(f"Communication style: {relationship.communication_style}")
+        return "\n".join(lines)

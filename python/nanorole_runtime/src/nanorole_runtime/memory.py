@@ -60,6 +60,18 @@ class MemoryExtraction:
     relationship_patch: RelationshipPatch | None
 
 
+@dataclass(frozen=True)
+class RelationshipState:
+    user_id: str
+    companion_id: str
+    summary: str
+    familiarity: float
+    trust: float
+    preferred_address: str | None
+    communication_style: str | None
+    updated_at: str
+
+
 def parse_memory_extraction(raw: dict[str, object]) -> MemoryExtraction:
     memories_raw = raw.get("memories")
     if not isinstance(memories_raw, list):
@@ -326,7 +338,102 @@ class MemoryStore:
             )
             by_content[created.content.strip().lower()] = created
             written.append(created)
+        if extraction.relationship_patch is not None:
+            self.apply_relationship_patch(
+                user_id=user_id,
+                companion_id=companion_id,
+                patch=extraction.relationship_patch,
+            )
         return written
+
+    def get_relationship_state(self, *, user_id: str, companion_id: str) -> RelationshipState | None:
+        row = self.database.fetch_one(
+            "select * from relationship_states where user_id = ? and companion_id = ?",
+            (user_id, companion_id),
+        )
+        if row is None:
+            return None
+        return RelationshipState(
+            user_id=str(row["user_id"]),
+            companion_id=str(row["companion_id"]),
+            summary=str(row["summary"]),
+            familiarity=float(row["familiarity"]),
+            trust=float(row["trust"]),
+            preferred_address=str(row["preferred_address"]) if row["preferred_address"] is not None else None,
+            communication_style=str(row["communication_style"]) if row["communication_style"] is not None else None,
+            updated_at=str(row["updated_at"]),
+        )
+
+    def upsert_relationship_state(
+        self,
+        *,
+        user_id: str,
+        companion_id: str,
+        summary: str,
+        familiarity: float,
+        trust: float,
+        preferred_address: str | None,
+        communication_style: str | None,
+    ) -> RelationshipState:
+        now = utc_now()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                insert into relationship_states (
+                  user_id, companion_id, summary, familiarity, trust,
+                  preferred_address, communication_style, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(user_id, companion_id) do update set
+                  summary = excluded.summary,
+                  familiarity = excluded.familiarity,
+                  trust = excluded.trust,
+                  preferred_address = excluded.preferred_address,
+                  communication_style = excluded.communication_style,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    companion_id,
+                    summary.strip(),
+                    _clamp(familiarity),
+                    _clamp(trust),
+                    preferred_address.strip() if preferred_address else None,
+                    communication_style.strip() if communication_style else None,
+                    now,
+                ),
+            )
+        state = self.get_relationship_state(user_id=user_id, companion_id=companion_id)
+        if state is None:
+            raise KeyError((user_id, companion_id))
+        return state
+
+    def apply_relationship_patch(
+        self,
+        *,
+        user_id: str,
+        companion_id: str,
+        patch: RelationshipPatch,
+    ) -> RelationshipState:
+        current = self.get_relationship_state(user_id=user_id, companion_id=companion_id)
+        if current is None:
+            return self.upsert_relationship_state(
+                user_id=user_id,
+                companion_id=companion_id,
+                summary=patch.summary or "",
+                familiarity=_clamp(patch.familiarity_delta),
+                trust=_clamp(patch.trust_delta),
+                preferred_address=patch.preferred_address,
+                communication_style=patch.communication_style,
+            )
+        return self.upsert_relationship_state(
+            user_id=user_id,
+            companion_id=companion_id,
+            summary=patch.summary or current.summary,
+            familiarity=_clamp(current.familiarity + patch.familiarity_delta),
+            trust=_clamp(current.trust + patch.trust_delta),
+            preferred_address=patch.preferred_address or current.preferred_address,
+            communication_style=patch.communication_style or current.communication_style,
+        )
 
     def _row_to_memory(self, row) -> MemoryRecord:
         sources = self.database.fetch_all(
@@ -415,3 +522,7 @@ def _optional_float(value: object, default: float) -> float:
     if not isinstance(value, (int, float)):
         raise ValueError("relationship delta fields must be numbers")
     return float(value)
+
+
+def _clamp(value: float) -> float:
+    return max(0.0, min(1.0, value))

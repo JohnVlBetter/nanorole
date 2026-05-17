@@ -77,3 +77,31 @@ def test_deleted_memory_is_excluded_from_context(tmp_path: Path) -> None:
     joined = "\n".join(item["content"] for item in messages)
     assert "The user likes direct pressure." not in joined
     assert used_memories == []
+
+
+def test_context_includes_relationship_state(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    store.upsert_relationship_state(
+        user_id="local-user",
+        companion_id="companion",
+        summary="The user likes calm check-ins and is building trust slowly.",
+        familiarity=0.2,
+        trust=0.3,
+        preferred_address="",
+        communication_style="calm check-ins",
+    )
+
+    assembler = ContextAssembler(memory_store=store)
+    messages, _ = assembler.build_messages(
+        role=role(),
+        user_id="local-user",
+        companion_id="companion",
+        history=[],
+        user_input="Can we talk for a bit?",
+    )
+
+    joined = "\n".join(item["content"] for item in messages)
+    assert "calm check-ins" in joined
+    assert "building trust slowly" in joined
