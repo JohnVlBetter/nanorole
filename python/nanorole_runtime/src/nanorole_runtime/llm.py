@@ -22,6 +22,14 @@ class ChatClient(Protocol):
     ) -> AsyncIterator[str]:
         ...
 
+    async def complete_json(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        config: AppConfig,
+    ) -> dict[str, Any]:
+        ...
+
 
 class OpenAICompatibleClient:
     async def stream_chat(
@@ -65,6 +73,41 @@ class OpenAICompatibleClient:
                         if on_first_token is not None:
                             on_first_token((time.perf_counter() - started) * 1000)
                         yield content
+
+    async def complete_json(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        config: AppConfig,
+    ) -> dict[str, Any]:
+        if not config.model.api_key:
+            raise RuntimeError("model API key is required for model requests")
+
+        url = f"{config.model.base_url.rstrip('/')}/chat/completions"
+        payload: dict[str, Any] = {
+            "model": config.model.name,
+            "messages": messages,
+            "stream": False,
+        }
+        if config.model.reasoning_effort:
+            payload["reasoning_effort"] = config.model.reasoning_effort
+        payload.update(config.model.extra_body)
+
+        headers = {
+            "Authorization": f"Bearer {config.model.api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=None) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+        content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as error:
+            raise ValueError("model returned invalid JSON") from error
+        if not isinstance(parsed, dict):
+            raise ValueError("model returned invalid JSON")
+        return parsed
 
 
 def build_chat_payload(

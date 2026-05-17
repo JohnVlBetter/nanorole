@@ -7,4 +7,4 @@ from dataclasses import dataclass
 class ChatMessage:
     role: str
     content: str
-
+    message_id: str | None = None

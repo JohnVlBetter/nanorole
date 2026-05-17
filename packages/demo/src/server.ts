@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path";
 
 import { readRuntimeLogs } from "./logs.js";
-import { CHAT_HTML, LOGS_HTML } from "./pages.js";
+import { CHAT_HTML, LOGS_HTML, MEMORIES_HTML } from "./pages.js";
 import { discoverRoles } from "./roles.js";
 
 export interface DemoServerOptions {
@@ -34,6 +34,10 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     sendHtml(response, LOGS_HTML);
     return;
   }
+  if (request.method === "GET" && url.pathname === "/memories") {
+    sendHtml(response, MEMORIES_HTML);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/roles") {
     sendJson(response, 200, { roles: await discoverRoles(options.projectRoot) });
     return;
@@ -46,9 +50,45 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions`);
     return;
   }
+  if (request.method === "GET" && url.pathname === "/api/sessions") {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions`);
+    return;
+  }
+  const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (request.method === "GET" && sessionMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(sessionMatch[1]))}`);
+    return;
+  }
+  const messagesMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+  if (request.method === "GET" && messagesMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(messagesMatch[1]))}/messages`);
+    return;
+  }
+  const contextPreviewMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-preview$/);
+  if (request.method === "GET" && contextPreviewMatch) {
+    await proxyRequest(
+      request,
+      response,
+      `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(contextPreviewMatch[1]))}/context-preview${url.search}`
+    );
+    return;
+  }
   const streamMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages:stream$/);
   if (request.method === "POST" && streamMatch) {
     await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(streamMatch[1]))}/messages:stream`);
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/memories") {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/memories${url.search}`);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/memories") {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/memories`);
+    return;
+  }
+  const memoryMatch = url.pathname.match(/^\/api\/memories\/([^/]+)$/);
+  if ((request.method === "PATCH" || request.method === "DELETE") && memoryMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/memories/${encodeURIComponent(decodeURIComponent(memoryMatch[1]))}`);
     return;
   }
   sendJson(response, 404, { error: "not found" });

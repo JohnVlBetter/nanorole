@@ -42,6 +42,7 @@ class PathsConfig:
     logs_dir: Path
     sessions_dir: Path
     roles_dir: Path
+    database_path: Path
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,12 @@ def load_config(
         "server": {"host": DEFAULT_HOST, "port": DEFAULT_PORT},
         "model": {"provider": "openai", "base_url": DEFAULT_BASE_URL, "name": DEFAULT_MODEL},
         "logging": {"level": "INFO", "trace_requests": False},
-        "paths": {"logs_dir": ".nanorole/logs", "sessions_dir": ".nanorole/sessions", "roles_dir": "examples/roles"},
+        "paths": {
+            "logs_dir": ".nanorole/logs",
+            "sessions_dir": ".nanorole/sessions",
+            "roles_dir": "examples/roles",
+            "database_path": ".nanorole/nanorole.sqlite3",
+        },
     }
 
     if config_file.exists():
@@ -117,6 +123,7 @@ def load_config(
             logs_dir=_resolve_path(root, data["paths"].get("logs_dir", ".nanorole/logs")),
             sessions_dir=_resolve_path(root, data["paths"].get("sessions_dir", ".nanorole/sessions")),
             roles_dir=_resolve_path(root, data["paths"].get("roles_dir", "examples/roles")),
+            database_path=_resolve_path(root, data["paths"].get("database_path", ".nanorole/nanorole.sqlite3")),
         ),
         repo_root=root,
     )

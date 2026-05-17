@@ -1,4 +1,5 @@
 from pathlib import Path
+import asyncio
 import json
 
 import pytest
@@ -150,3 +151,29 @@ async def test_request_completed_log_includes_llm_input_and_output(tmp_path: Pat
     assert completed["first_chunk_latency_ms"] is not None
     assert completed["first_token_latency_ms"] == 56.78
     assert completed["first_chunk_latency_ms"] == 12.34
+
+
+async def test_slow_memory_extraction_does_not_block_final_stream_event(tmp_path: Path, role: RolePackage) -> None:
+    class SlowExtractionClient(ChatClient):
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            yield "hello"
+
+        async def complete_json(self, *, messages, config):
+            await self.release.wait()
+            return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
+    create_role_file(tmp_path, role)
+    client = SlowExtractionClient()
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=client)
+    session = manager.create_session(role.id)
+    stream = manager.stream_message(session.session_id, "Hi")
+
+    token = await asyncio.wait_for(anext(stream), timeout=0.5)
+    final = await asyncio.wait_for(anext(stream), timeout=0.5)
+    client.release.set()
+
+    assert token.type == "token"
+    assert final.type == "final"
