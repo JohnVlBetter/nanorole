@@ -45,6 +45,30 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             "opening": session.role_opening,
         }
 
+    @app.get("/v1/sessions")
+    def list_sessions() -> dict[str, list[dict[str, str | None]]]:
+        return {"sessions": [_session_summary(session) for session in manager.list_sessions()]}
+
+    @app.get("/v1/sessions/{session_id}")
+    def get_session(session_id: str) -> dict[str, str | None]:
+        try:
+            return _session_detail(manager.get_session(session_id))
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"session not found: {session_id}") from error
+
+    @app.get("/v1/sessions/{session_id}/messages")
+    def get_messages(session_id: str) -> dict[str, list[dict[str, str | None]]]:
+        try:
+            session = manager.get_session(session_id)
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"session not found: {session_id}") from error
+        return {
+            "messages": [
+                {"messageId": message.message_id, "role": message.role, "content": message.content}
+                for message in session.history
+            ]
+        }
+
     @app.post("/v1/sessions/{session_id}/messages:stream")
     async def stream_message(session_id: str, request: StreamMessageRequest) -> StreamingResponse:
         async def events():
@@ -68,3 +92,23 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
 
 def _sse(event_type: str, data: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _session_summary(session) -> dict[str, str | None]:
+    return {
+        "sessionId": session.session_id,
+        "roleId": session.role_id,
+        "roleName": session.role_name,
+        "createdAt": session.created_at,
+        "updatedAt": session.updated_at,
+        "lastMessageAt": session.last_message_at,
+    }
+
+
+def _session_detail(session) -> dict[str, str | None]:
+    return {
+        **_session_summary(session),
+        "roleVersion": session.role_version,
+        "opening": session.role_opening,
+        "status": session.status,
+    }
