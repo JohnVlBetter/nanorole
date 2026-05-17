@@ -18,3 +18,4 @@ logging:
 paths:
   logs_dir: .nanorole/logs
   sessions_dir: .nanorole/sessions
+  database_path: .nanorole/nanorole.sqlite3
