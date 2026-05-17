@@ -309,6 +309,7 @@ export const MEMORIES_HTML = `<!doctype html>
     .memory textarea { min-height: 64px; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; background: var(--accent-soft); color: var(--accent); padding: 3px 8px; font-size: 12px; font-weight: 700; }
+    pre { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: Consolas, monospace; font-size: 12px; line-height: 18px; }
     @media (max-width: 880px) { main { grid-template-columns: 1fr; } .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -332,6 +333,11 @@ export const MEMORIES_HTML = `<!doctype html>
         <label class="full">Content<textarea id="new-content"></textarea></label>
         <button class="primary full" type="submit">Add memory</button>
       </form>
+      <form class="panel grid" id="preview-form">
+        <label class="full">Session ID<input id="preview-session" /></label>
+        <label class="full">User input<input id="preview-input" placeholder="optional next message" /></label>
+        <button class="primary full" type="submit">Preview context</button>
+      </form>
     </aside>
     <section id="memories"></section>
   </main>
@@ -343,8 +349,11 @@ export const MEMORIES_HTML = `<!doctype html>
     const companionInput = document.querySelector("#companion-id");
     const filters = document.querySelector("#filters");
     const addForm = document.querySelector("#add-form");
+    const previewForm = document.querySelector("#preview-form");
+    const previewSession = document.querySelector("#preview-session");
     userInput.value = params.get("userId") || "local-user";
     companionInput.value = params.get("companionId") || "";
+    previewSession.value = params.get("sessionId") || "";
     let memories = [];
     function sourceIds(value) {
       return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
@@ -375,6 +384,15 @@ export const MEMORIES_HTML = `<!doctype html>
         empty.textContent = "No active memories.";
         memoriesEl.append(empty);
       }
+    }
+    function renderPreview(data) {
+      const panel = document.createElement("div");
+      panel.className = "panel";
+      const system = Array.isArray(data.messages) ? data.messages.find((item) => item.role === "system") : null;
+      panel.innerHTML = '<h2>Context preview</h2><pre></pre><div class="muted"></div>';
+      panel.querySelector("pre").textContent = system ? system.content : JSON.stringify(data, null, 2);
+      panel.querySelector(".muted").textContent = "Selected memories: " + ((data.usedMemories || []).map((item) => item.memoryId).join(", ") || "-");
+      memoriesEl.prepend(panel);
     }
     function memoryCard(memory) {
       const card = document.createElement("article");
@@ -441,6 +459,17 @@ export const MEMORIES_HTML = `<!doctype html>
       document.querySelector("#new-content").value = "";
       document.querySelector("#new-sources").value = "";
       await loadMemories();
+    };
+    previewForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const sessionId = previewSession.value.trim();
+      if (!sessionId) {
+        statusEl.textContent = "Session ID is required for context preview.";
+        return;
+      }
+      const query = new URLSearchParams({ userInput: document.querySelector("#preview-input").value });
+      const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/context-preview?" + query.toString(), { cache: "no-store" });
+      renderPreview(await response.json());
     };
     loadMemories().catch((error) => statusEl.textContent = String(error));
   </script>

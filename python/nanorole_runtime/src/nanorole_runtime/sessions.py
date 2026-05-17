@@ -134,6 +134,33 @@ class SessionManager:
         )
         return [self._state_from_session_row(row, include_history=True) for row in rows]
 
+    def preview_context(self, session_id: str, user_input: str = "") -> dict[str, object]:
+        session = self.get_session(session_id)
+        role = self._resolve_role(session.role_id)
+        memory_store = MemoryStore(self.database)
+        assembler = ContextAssembler(memory_store=memory_store)
+        messages, used_memories = assembler.build_messages(
+            role=role,
+            user_id=DEFAULT_USER_ID,
+            companion_id=role.id,
+            history=session.history,
+            user_input=user_input,
+        )
+        return {
+            "sessionId": session.session_id,
+            "messages": messages,
+            "usedMemories": [
+                {
+                    "memoryId": memory.memory_id,
+                    "type": memory.type,
+                    "content": memory.content,
+                    "importance": memory.importance,
+                    "confidence": memory.confidence,
+                }
+                for memory in used_memories
+            ],
+        }
+
     async def stream_message(self, session_id: str, message: str) -> AsyncIterator[StreamEvent]:
         session = self.get_session(session_id)
         role = self._resolve_role(session.role_id)

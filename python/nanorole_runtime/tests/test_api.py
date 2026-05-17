@@ -54,6 +54,7 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
         f"/v1/sessions/{session_id}/messages:stream",
         json={"message": "Hello"},
     )
+    preview = client.get(f"/v1/sessions/{session_id}/context-preview?userInput=Next")
     exported = client.get(f"/v1/sessions/{session_id}/export")
 
     assert health.json() == {"status": "ok", "service": "nanorole-runtime"}
@@ -64,6 +65,9 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
     assert '"delta": "first"' in streamed.text
     assert "event: final" in streamed.text
     assert '"message": "first second"' in streamed.text
+    assert preview.status_code == 200
+    assert preview.json()["sessionId"] == session_id
+    assert preview.json()["messages"][-1] == {"role": "user", "content": "Next"}
     assert exported.status_code == 200
     assert '"type": "assistant_message"' in exported.text
 

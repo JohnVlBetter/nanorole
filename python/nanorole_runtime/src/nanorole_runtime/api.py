@@ -90,6 +90,13 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             ]
         }
 
+    @app.get("/v1/sessions/{session_id}/context-preview")
+    def context_preview(session_id: str, userInput: str = "") -> dict[str, object]:
+        try:
+            return manager.preview_context(session_id, user_input=userInput)
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"session not found: {session_id}") from error
+
     @app.get("/v1/memories")
     def list_memories(userId: str = DEFAULT_USER_ID, companionId: str = "") -> dict[str, list[dict[str, object]]]:
         if not companionId:
