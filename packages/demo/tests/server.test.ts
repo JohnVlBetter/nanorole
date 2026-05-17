@@ -64,7 +64,7 @@ describe("demo server", () => {
     });
   });
 
-  test("keeps the chat composer focusable and starts a default session", async () => {
+  test("keeps the chat composer focusable without auto-starting sessions", async () => {
     const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
     const baseUrl = await listen(demo);
 
@@ -72,7 +72,8 @@ describe("demo server", () => {
 
     expect(html).not.toMatch(/<textarea[^>]*\sdisabled\b/i);
     expect(html).toContain("input.readOnly = !enabled");
-    expect(html).toContain("await startSession();");
+    expect(html).toContain("startButton.onclick = startSession");
+    expect(html).not.toContain("await startSession();");
   });
 
   test("proxies session creation and message streams to Python core", async () => {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -226,37 +227,14 @@ class SessionManager:
             assistant_chat_message = self._persist_message(session.session_id, "assistant", assistant_message)
             session.history.append(assistant_chat_message)
             self._record(session, "assistant_message", {"session_id": session_id, "role_id": session.role_id, "content": assistant_message})
-            try:
-                extractor = MemoryExtractor(client=self.client, config=session.config, store=memory_store)
-                extraction = await extractor.extract_after_turn(
-                    user_id=DEFAULT_USER_ID,
-                    companion_id=role.id,
-                    user_message_id=user_message.message_id or "",
-                    user_message=message,
-                    assistant_message_id=assistant_chat_message.message_id or "",
-                    assistant_message=assistant_message,
-                )
-                written = memory_store.apply_extraction(
-                    user_id=DEFAULT_USER_ID,
-                    companion_id=role.id,
-                    extraction=extraction,
-                )
-                self._record(
-                    session,
-                    "memory_extraction",
-                    {
-                        "session_id": session_id,
-                        "role_id": session.role_id,
-                        "memory_ids": [memory.memory_id for memory in written],
-                        "archived_memory_ids": extraction.archive_memory_ids,
-                    },
-                )
-            except Exception as extraction_error:
-                self._record(
-                    session,
-                    "memory_extraction_failed",
-                    {"session_id": session_id, "role_id": session.role_id, "message": str(extraction_error)},
-                )
+            self._schedule_memory_extraction(
+                session=session,
+                role=role,
+                user_message=user_message,
+                user_text=message,
+                assistant_message=assistant_chat_message,
+                assistant_text=assistant_message,
+            )
             self._write_log(
                 "request_completed",
                 {
@@ -344,6 +322,77 @@ class SessionManager:
         line = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with (self.config.paths.logs_dir / "runtime.jsonl").open("a", encoding="utf-8") as file:
             file.write(f"{line}\n")
+
+    def _schedule_memory_extraction(
+        self,
+        *,
+        session: SessionState,
+        role: RolePackage,
+        user_message: ChatMessage,
+        user_text: str,
+        assistant_message: ChatMessage,
+        assistant_text: str,
+    ) -> None:
+        task = asyncio.create_task(
+            self._extract_memory_after_turn(
+                session=session,
+                role=role,
+                user_message=user_message,
+                user_text=user_text,
+                assistant_message=assistant_message,
+                assistant_text=assistant_text,
+            )
+        )
+        task.add_done_callback(self._consume_background_task_exception)
+
+    def _consume_background_task_exception(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+
+    async def _extract_memory_after_turn(
+        self,
+        *,
+        session: SessionState,
+        role: RolePackage,
+        user_message: ChatMessage,
+        user_text: str,
+        assistant_message: ChatMessage,
+        assistant_text: str,
+    ) -> None:
+        memory_store = MemoryStore(self.database)
+        try:
+            extractor = MemoryExtractor(client=self.client, config=session.config, store=memory_store)
+            extraction = await extractor.extract_after_turn(
+                user_id=DEFAULT_USER_ID,
+                companion_id=role.id,
+                user_message_id=user_message.message_id or "",
+                user_message=user_text,
+                assistant_message_id=assistant_message.message_id or "",
+                assistant_message=assistant_text,
+            )
+            written = memory_store.apply_extraction(
+                user_id=DEFAULT_USER_ID,
+                companion_id=role.id,
+                extraction=extraction,
+            )
+            self._record(
+                session,
+                "memory_extraction",
+                {
+                    "session_id": session.session_id,
+                    "role_id": session.role_id,
+                    "memory_ids": [memory.memory_id for memory in written],
+                    "archived_memory_ids": extraction.archive_memory_ids,
+                },
+            )
+        except Exception as extraction_error:
+            self._record(
+                session,
+                "memory_extraction_failed",
+                {"session_id": session.session_id, "role_id": session.role_id, "message": str(extraction_error)},
+            )
 
     def _persist_session(self, session: SessionState, role: RolePackage, now: str) -> None:
         with self.database.connect() as connection:

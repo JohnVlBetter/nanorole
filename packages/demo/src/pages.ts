@@ -110,11 +110,21 @@ export const CHAT_HTML = `<!doctype html>
         button.querySelector(".meta").textContent = role.id + " · " + (role.version || "-");
         button.onclick = async () => {
           selectedRole = role;
+          sessionId = null;
+          heading.textContent = role.name || role.id;
+          sessionLine.textContent = "已选择角色，点击开始会话";
+          messagesEl.replaceChildren();
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = role.opening || "点击开始会话创建新会话。";
+          messagesEl.append(empty);
           roleDetail.textContent = ((role.persona || "") + "\\n\\n" + (role.opening || "")).trim();
           startButton.disabled = false;
+          resetButton.disabled = true;
+          setComposer(false);
           renderRoles();
+          renderSessions();
           updateMemoryLink();
-          await startSession();
         };
         rolesEl.append(button);
       }
@@ -181,7 +191,7 @@ export const CHAT_HTML = `<!doctype html>
         renderRoles();
         updateMemoryLink();
         await loadSessions();
-        if (selectedRole) await startSession();
+        setComposer(false);
       } catch (error) {
         roleStatus.textContent = "角色读取失败";
         roleDetail.textContent = String(error);
