@@ -16,5 +16,16 @@ describe("parseCliArgs", () => {
       }
     });
   });
-});
 
+  test("parses logs command and runtime flags", () => {
+    const parsed = parseCliArgs(["logs", "--port", "9999", "--host", "127.0.0.2"]);
+
+    expect(parsed).toEqual({
+      command: "logs",
+      flags: {
+        port: 9999,
+        host: "127.0.0.2"
+      }
+    });
+  });
+});

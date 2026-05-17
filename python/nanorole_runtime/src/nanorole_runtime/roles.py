@@ -23,6 +23,10 @@ class RoleValidationError(ValueError):
     """Raised when a role package does not match the v1 role format."""
 
 
+class RoleNotFoundError(KeyError):
+    """Raised when a role id cannot be resolved from the role directory."""
+
+
 @dataclass(frozen=True)
 class RolePackage:
     id: str
@@ -36,6 +40,32 @@ class RolePackage:
     style: dict[str, Any] = field(default_factory=dict)
     safety_rules: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def load_role_by_id(roles_root: str | Path, role_id: str) -> RolePackage:
+    root = Path(roles_root)
+    if not root.exists():
+        raise RoleNotFoundError(role_id)
+
+    # Fast path for directories keyed by role id.
+    candidate = root / role_id
+    if candidate.is_dir():
+        role = load_role_package(candidate)
+        if role.id == role_id:
+            return role
+
+    # Fallback scan to support role ids that differ from directory names.
+    for entry in sorted(root.iterdir(), key=lambda item: item.name):
+        if not entry.is_dir():
+            continue
+        try:
+            role = load_role_package(entry)
+        except RoleValidationError:
+            continue
+        if role.id == role_id:
+            return role
+
+    raise RoleNotFoundError(role_id)
 
 
 def load_role_package(role_dir: str | Path) -> RolePackage:

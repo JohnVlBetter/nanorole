@@ -5,7 +5,7 @@ export async function createSession(baseUrl: string, role: RolePackage): Promise
   const response = await fetch(`${baseUrl}/v1/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role })
+    body: JSON.stringify({ role_id: role.id })
   });
   if (!response.ok) {
     throw new Error(`failed to create session: ${response.status} ${await response.text()}`);
@@ -31,4 +31,3 @@ export async function* streamMessage(baseUrl: string, sessionId: string, message
     }
   }
 }
-

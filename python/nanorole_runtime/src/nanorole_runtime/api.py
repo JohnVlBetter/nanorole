@@ -9,12 +9,12 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .llm import ChatClient, OpenAICompatibleClient
-from .roles import RolePackage, RoleValidationError
+from .roles import RoleNotFoundError
 from .sessions import SessionManager, SessionNotFoundError
 
 
 class CreateSessionRequest(BaseModel):
-    role: dict[str, Any]
+    role_id: str
 
 
 class StreamMessageRequest(BaseModel):
@@ -33,15 +33,16 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
     @app.post("/v1/sessions")
     def create_session(request: CreateSessionRequest) -> dict[str, str]:
         try:
-            role = RolePackage(**request.role)
+            session = manager.create_session(request.role_id)
+        except RoleNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"role not found: {request.role_id}") from error
         except (TypeError, ValueError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        session = manager.create_session(role)
         return {
             "sessionId": session.session_id,
-            "roleId": role.id,
-            "roleName": role.name,
-            "opening": role.opening,
+            "roleId": session.role_id,
+            "roleName": session.role_name,
+            "opening": session.role_opening,
         }
 
     @app.post("/v1/sessions/{session_id}/messages:stream")
@@ -67,4 +68,3 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
 
 def _sse(event_type: str, data: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-

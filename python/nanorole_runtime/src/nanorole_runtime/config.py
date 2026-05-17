@@ -41,6 +41,7 @@ class LoggingConfig:
 class PathsConfig:
     logs_dir: Path
     sessions_dir: Path
+    roles_dir: Path
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ def load_config(
     env_path: str | Path | None = None,
     overrides: Mapping[str, Any] | None = None,
 ) -> AppConfig:
-    root = Path(repo_root or os.environ.get("NANOROLE_PROJECT_ROOT") or Path.cwd()).resolve()
+    root = _find_repo_root(Path(repo_root or os.environ.get("NANOROLE_PROJECT_ROOT") or Path.cwd()).resolve())
     config_file = Path(config_path) if config_path else root / "nanorole.config.yaml"
     env_file = Path(env_path) if env_path else root / ".env"
 
@@ -67,7 +68,7 @@ def load_config(
         "server": {"host": DEFAULT_HOST, "port": DEFAULT_PORT},
         "model": {"provider": "openai", "base_url": DEFAULT_BASE_URL, "name": DEFAULT_MODEL},
         "logging": {"level": "INFO", "trace_requests": False},
-        "paths": {"logs_dir": ".nanorole/logs", "sessions_dir": ".nanorole/sessions"},
+        "paths": {"logs_dir": ".nanorole/logs", "sessions_dir": ".nanorole/sessions", "roles_dir": "examples/roles"},
     }
 
     if config_file.exists():
@@ -115,6 +116,7 @@ def load_config(
         paths=PathsConfig(
             logs_dir=_resolve_path(root, data["paths"].get("logs_dir", ".nanorole/logs")),
             sessions_dir=_resolve_path(root, data["paths"].get("sessions_dir", ".nanorole/sessions")),
+            roles_dir=_resolve_path(root, data["paths"].get("roles_dir", "examples/roles")),
         ),
         repo_root=root,
     )
@@ -147,6 +149,15 @@ def _resolve_path(root: Path, value: str | Path) -> Path:
     if not path.is_absolute():
         path = root / path
     return path.resolve()
+
+
+def _find_repo_root(start: Path) -> Path:
+    if (start / "nanorole.config.yaml").exists():
+        return start
+    for parent in start.parents:
+        if (parent / "nanorole.config.yaml").exists():
+            return parent
+    return start
 
 
 def _is_secret_key(key: str) -> bool:

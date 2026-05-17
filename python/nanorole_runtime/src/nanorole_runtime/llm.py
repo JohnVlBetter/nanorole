@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Protocol
+import time
+from typing import Any, AsyncIterator, Callable, Protocol
 
 import httpx
 
@@ -16,6 +17,8 @@ class ChatClient(Protocol):
         messages: list[dict[str, str]],
         config: AppConfig,
         role: RolePackage,
+        on_first_chunk: Callable[[float], None] | None = ...,
+        on_first_token: Callable[[float], None] | None = ...,
     ) -> AsyncIterator[str]:
         ...
 
@@ -27,7 +30,11 @@ class OpenAICompatibleClient:
         messages: list[dict[str, str]],
         config: AppConfig,
         role: RolePackage,
+        on_first_chunk: Callable[[float], None] | None = None,
+        on_first_token: Callable[[float], None] | None = None,
     ) -> AsyncIterator[str]:
+        started = time.perf_counter()
+        first_chunk_reported = False
         if not config.model.api_key:
             raise RuntimeError("model API key is required for model requests")
 
@@ -44,6 +51,10 @@ class OpenAICompatibleClient:
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
+                    if not first_chunk_reported:
+                        first_chunk_reported = True
+                        if on_first_chunk is not None:
+                            on_first_chunk((time.perf_counter() - started) * 1000)
                     data = line.removeprefix("data: ").strip()
                     if data == "[DONE]":
                         break
@@ -51,6 +62,8 @@ class OpenAICompatibleClient:
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     content = delta.get("content")
                     if content:
+                        if on_first_token is not None:
+                            on_first_token((time.perf_counter() - started) * 1000)
                         yield content
 
 

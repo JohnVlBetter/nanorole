@@ -91,6 +91,31 @@ def test_load_config_reads_trace_requests_from_environment(tmp_path: Path, monke
     assert config.logging.trace_requests is True
 
 
+def test_load_config_discovers_repo_root_from_nested_runtime_directory(tmp_path: Path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "python" / "nanorole_runtime"
+    runtime_dir.mkdir(parents=True)
+    (tmp_path / "nanorole.config.yaml").write_text(
+        "\n".join(
+            [
+                "model:",
+                "  provider: deepseek",
+                "  name: deepseek-v4-pro",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=test-key\n", encoding="utf-8")
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("NANOROLE_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    config = load_config()
+
+    assert config.repo_root == tmp_path
+    assert config.model.provider == "deepseek"
+    assert config.model.api_key == "test-key"
+
+
 def test_load_config_reads_deepseek_api_key_and_request_options(tmp_path: Path) -> None:
     config_path = tmp_path / "nanorole.config.yaml"
     config_path.write_text(

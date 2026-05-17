@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from nanorole_runtime.roles import RoleValidationError, load_role_package
+from nanorole_runtime.roles import RoleNotFoundError, RoleValidationError, load_role_by_id, load_role_package
 
 
-def write_role(root: Path, **overrides: object) -> Path:
-    role_dir = root / "role"
-    role_dir.mkdir()
+def write_role(root: Path, subdir: str = "role", **overrides: object) -> Path:
+    role_dir = root / subdir
+    role_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "id": "clockwork-sage",
         "name": "Clockwork Sage",
@@ -68,3 +68,21 @@ def test_load_role_package_rejects_model_field_because_model_is_runtime_config(t
         load_role_package(role_dir)
 
     assert "model belongs in runtime config" in str(error.value)
+
+
+def test_load_role_by_id_finds_matching_role_from_examples_dir(tmp_path: Path) -> None:
+    roles_root = tmp_path / "examples" / "roles"
+    clockwork = write_role(roles_root, subdir="clockwork-sage", id="clockwork-sage")
+    write_role(roles_root, subdir="another-role", id="another-role")
+
+    role = load_role_by_id(tmp_path / "examples" / "roles", "clockwork-sage")
+
+    assert role.id == "clockwork-sage"
+
+
+def test_load_role_by_id_raises_when_not_found(tmp_path: Path) -> None:
+    roles_root = tmp_path / "examples" / "roles"
+    roles_root.mkdir(parents=True)
+
+    with pytest.raises(RoleNotFoundError):
+        load_role_by_id(roles_root, "missing-role")
