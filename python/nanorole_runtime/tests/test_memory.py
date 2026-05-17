@@ -18,7 +18,7 @@ def test_memory_store_creates_and_lists_active_memory(tmp_path: Path) -> None:
         content="The user prefers gentle reminders.",
         importance=0.7,
         confidence=0.9,
-        source_message_ids=[],
+        source_message_ids=["m1"],
     )
 
     memories = store.list_memories(user_id="local-user", companion_id="companion")
@@ -40,7 +40,7 @@ def test_deleted_memory_is_not_returned_by_default(tmp_path: Path) -> None:
         content="The user does not want work stress stored in memory.",
         importance=1.0,
         confidence=1.0,
-        source_message_ids=[],
+        source_message_ids=["m1"],
     )
 
     store.delete_memory(memory.memory_id)
@@ -89,6 +89,50 @@ def test_parse_memory_extraction_accepts_valid_memory() -> None:
     parsed = parse_memory_extraction(raw)
 
     assert parsed.memories[0].content == "The user prefers gentle reminders."
+
+
+def test_parse_memory_extraction_rejects_empty_source_messages() -> None:
+    raw = {
+        "memories": [
+            {
+                "type": "preference",
+                "content": "The user prefers gentle reminders.",
+                "importance": 0.7,
+                "confidence": 0.8,
+                "source_message_ids": [],
+            }
+        ],
+        "archive_memory_ids": [],
+        "relationship_patch": None,
+    }
+
+    try:
+        parse_memory_extraction(raw)
+    except ValueError as error:
+        assert "source_message_ids must include at least one source message id" in str(error)
+    else:
+        raise AssertionError("expected empty source messages to fail")
+
+
+def test_memory_store_requires_source_messages(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+
+    try:
+        store.create_memory(
+            user_id="local-user",
+            companion_id="companion",
+            memory_type="preference",
+            content="The user prefers gentle reminders.",
+            importance=0.7,
+            confidence=0.9,
+            source_message_ids=[],
+        )
+    except ValueError as error:
+        assert "source message id" in str(error)
+    else:
+        raise AssertionError("expected memory creation without source messages to fail")
 
 
 def test_parse_memory_extraction_normalizes_common_score_labels() -> None:

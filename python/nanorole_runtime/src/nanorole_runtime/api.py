@@ -22,6 +22,11 @@ class StreamMessageRequest(BaseModel):
     message: str
 
 
+class UpdateSessionRequest(BaseModel):
+    title: str | None = None
+    status: str | None = None
+
+
 class CreateMemoryRequest(BaseModel):
     userId: str = DEFAULT_USER_ID
     companionId: str
@@ -77,6 +82,15 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
         except SessionNotFoundError as error:
             raise HTTPException(status_code=404, detail=f"session not found: {session_id}") from error
 
+    @app.patch("/v1/sessions/{session_id}")
+    def update_session(session_id: str, request: UpdateSessionRequest) -> dict[str, str | None]:
+        try:
+            return _session_detail(manager.update_session(session_id, title=request.title, status=request.status))
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"session not found: {session_id}") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/v1/sessions/{session_id}/messages")
     def get_messages(session_id: str) -> dict[str, list[dict[str, str | None]]]:
         try:
@@ -105,7 +119,7 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             memories = memory_store.list_memories(user_id=userId, companion_id=companionId)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return {"memories": [_memory_response(memory) for memory in memories]}
+        return {"memories": [_memory_response(memory, memory_store) for memory in memories]}
 
     @app.post("/v1/memories")
     def create_memory(request: CreateMemoryRequest) -> dict[str, object]:
@@ -121,7 +135,7 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _memory_response(memory)
+        return _memory_response(memory, memory_store)
 
     @app.patch("/v1/memories/{memory_id}")
     def update_memory(memory_id: str, request: UpdateMemoryRequest) -> dict[str, object]:
@@ -139,7 +153,7 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"memory not found: {memory_id}") from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _memory_response(memory)
+        return _memory_response(memory, memory_store)
 
     @app.delete("/v1/memories/{memory_id}")
     def delete_memory(memory_id: str) -> dict[str, object]:
@@ -147,7 +161,7 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             memory = memory_store.delete_memory(memory_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=f"memory not found: {memory_id}") from error
-        return _memory_response(memory)
+        return _memory_response(memory, memory_store)
 
     @app.post("/v1/sessions/{session_id}/messages:stream")
     async def stream_message(session_id: str, request: StreamMessageRequest) -> StreamingResponse:
@@ -179,6 +193,8 @@ def _session_summary(session) -> dict[str, str | None]:
         "sessionId": session.session_id,
         "roleId": session.role_id,
         "roleName": session.role_name,
+        "title": session.title,
+        "status": session.status,
         "createdAt": session.created_at,
         "updatedAt": session.updated_at,
         "lastMessageAt": session.last_message_at,
@@ -190,11 +206,10 @@ def _session_detail(session) -> dict[str, str | None]:
         **_session_summary(session),
         "roleVersion": session.role_version,
         "opening": session.role_opening,
-        "status": session.status,
     }
 
 
-def _memory_response(memory: MemoryRecord) -> dict[str, object]:
+def _memory_response(memory: MemoryRecord, memory_store: MemoryStore) -> dict[str, object]:
     return {
         "memoryId": memory.memory_id,
         "userId": memory.user_id,
@@ -209,4 +224,12 @@ def _memory_response(memory: MemoryRecord) -> dict[str, object]:
         "lastUsedAt": memory.last_used_at,
         "useCount": memory.use_count,
         "sourceMessageIds": memory.source_message_ids,
+        "sourceMessages": [
+            {
+                "messageId": source.message_id,
+                "role": source.role,
+                "content": source.content,
+            }
+            for source in memory_store.get_source_messages(memory.memory_id)
+        ],
     }

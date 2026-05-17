@@ -55,7 +55,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
   const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
-  if (request.method === "GET" && sessionMatch) {
+  if ((request.method === "GET" || request.method === "PATCH") && sessionMatch) {
     await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(sessionMatch[1]))}`);
     return;
   }

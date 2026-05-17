@@ -12,6 +12,9 @@ class StubClient(ChatClient):
         yield "first"
         yield " second"
 
+    async def complete_json(self, *, messages, config):
+        return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
 
 def role_payload() -> dict[str, object]:
     return {
@@ -70,6 +73,81 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
     assert preview.json()["messages"][-1] == {"role": "user", "content": "Next"}
     assert exported.status_code == 200
     assert '"type": "assistant_message"' in exported.text
+
+
+def test_fastapi_route_updates_session_title_and_status(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+    session_id = client.post("/v1/sessions", json={"role_id": "clockwork-sage"}).json()["sessionId"]
+
+    updated = client.patch(
+        f"/v1/sessions/{session_id}",
+        json={"title": "Evening check-in", "status": "archived"},
+    )
+    fetched = client.get(f"/v1/sessions/{session_id}")
+
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "Evening check-in"
+    assert updated.json()["status"] == "archived"
+    assert fetched.json()["title"] == "Evening check-in"
+    assert fetched.json()["status"] == "archived"
+
+
+def test_fastapi_route_rejects_invalid_session_status(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+    session_id = client.post("/v1/sessions", json={"role_id": "clockwork-sage"}).json()["sessionId"]
+
+    response = client.patch(f"/v1/sessions/{session_id}", json={"status": "hidden"})
+
+    assert response.status_code == 400
+    assert "invalid session status" in response.text
+
+
+def test_fastapi_route_soft_deletes_session(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+    session_id = client.post("/v1/sessions", json={"role_id": "clockwork-sage"}).json()["sessionId"]
+
+    deleted = client.patch(f"/v1/sessions/{session_id}", json={"status": "deleted"})
+    fetched = client.get(f"/v1/sessions/{session_id}")
+    listed = client.get("/v1/sessions")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["status"] == "deleted"
+    assert fetched.status_code == 404
+    assert all(item["sessionId"] != session_id for item in listed.json()["sessions"])
+
+
+def test_memory_responses_include_source_message_content(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+    session_id = client.post("/v1/sessions", json={"role_id": "clockwork-sage"}).json()["sessionId"]
+    client.post(f"/v1/sessions/{session_id}/messages:stream", json={"message": "Remember that I like tea."})
+    messages = client.get(f"/v1/sessions/{session_id}/messages").json()["messages"]
+    user_message_id = messages[0]["messageId"]
+
+    created = client.post(
+        "/v1/memories",
+        json={
+            "companionId": "clockwork-sage",
+            "type": "preference",
+            "content": "The user likes tea.",
+            "importance": 0.7,
+            "confidence": 0.9,
+            "sourceMessageIds": [user_message_id],
+        },
+    )
+    listed = client.get("/v1/memories?userId=local-user&companionId=clockwork-sage")
+
+    assert created.status_code == 200
+    assert listed.json()["memories"][0]["sourceMessages"] == [
+        {"messageId": user_message_id, "role": "user", "content": "Remember that I like tea."}
+    ]
 
 
 def test_create_session_requires_existing_role(tmp_path: Path) -> None:

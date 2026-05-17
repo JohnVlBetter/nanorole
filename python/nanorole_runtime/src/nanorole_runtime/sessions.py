@@ -15,9 +15,11 @@ from .memory import MemoryExtractor, MemoryStore
 from .roles import RolePackage, load_role_by_id
 from .sessions_types import ChatMessage
 from .storage import Database
+from .summaries import SummaryStore, generate_session_summary, should_update_summary
 
 
 DEFAULT_USER_ID = "local-user"
+VALID_SESSION_STATUS = {"active", "archived", "deleted"}
 
 
 @dataclass
@@ -48,6 +50,7 @@ class SessionState:
     role_version: str
     role_opening: str
     config: AppConfig
+    title: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     last_message_at: str | None = None
@@ -146,6 +149,7 @@ class SessionManager:
             companion_id=role.id,
             history=session.history,
             user_input=user_input,
+            session_summary=self._session_summary_text(session.session_id),
         )
         return {
             "sessionId": session.session_id,
@@ -183,6 +187,7 @@ class SessionManager:
                 companion_id=role.id,
                 history=session.history[:-1],
                 user_input=message,
+                session_summary=self._session_summary_text(session.session_id),
             )
             used_memory_ids = [memory.memory_id for memory in used_memories]
             memory_store.mark_used(used_memory_ids)
@@ -235,6 +240,7 @@ class SessionManager:
                 assistant_message=assistant_chat_message,
                 assistant_text=assistant_message,
             )
+            self._schedule_summary_update(session=session)
             self._write_log(
                 "request_completed",
                 {
@@ -286,6 +292,37 @@ class SessionManager:
         session.config.paths.sessions_dir.mkdir(parents=True, exist_ok=True)
         (session.config.paths.sessions_dir / f"{session_id}.jsonl").write_text(exported, encoding="utf-8")
         return exported
+
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        status: str | None = None,
+    ) -> SessionState:
+        session = self.get_session(session_id)
+        if status is not None and status not in VALID_SESSION_STATUS:
+            raise ValueError(f"invalid session status: {status}")
+        next_title = session.title
+        if title is not None:
+            next_title = title.strip() or None
+        next_status = status or session.status
+        now = self._now()
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                update sessions
+                set title = ?, status = ?, updated_at = ?
+                where id = ?
+                """,
+                (next_title, next_status, now, session_id),
+            )
+        session.title = next_title
+        session.status = next_status
+        session.updated_at = now
+        if next_status == "deleted":
+            self._sessions.pop(session_id, None)
+        return session
 
     def _record(self, session: SessionState, event_type: str, data: dict[str, Any]) -> None:
         event = RuntimeEvent(event_type, data)
@@ -345,6 +382,10 @@ class SessionManager:
         )
         task.add_done_callback(self._consume_background_task_exception)
 
+    def _schedule_summary_update(self, *, session: SessionState) -> None:
+        task = asyncio.create_task(self._update_summary_after_turn(session=session))
+        task.add_done_callback(self._consume_background_task_exception)
+
     def _consume_background_task_exception(self, task: asyncio.Task[None]) -> None:
         try:
             task.exception()
@@ -392,6 +433,44 @@ class SessionManager:
                 session,
                 "memory_extraction_failed",
                 {"session_id": session.session_id, "role_id": session.role_id, "message": str(extraction_error)},
+            )
+
+    async def _update_summary_after_turn(self, *, session: SessionState) -> None:
+        store = SummaryStore(self.database)
+        try:
+            history = self._load_messages(session.session_id)
+            existing = store.get_latest_summary(session.session_id)
+            covered_count = store.get_covered_message_count(session.session_id)
+            if not should_update_summary(history, covered_count):
+                return
+            new_messages = history[covered_count:]
+            summary = await generate_session_summary(
+                client=self.client,
+                config=session.config,
+                previous_summary=existing.summary if existing is not None else "",
+                messages=new_messages,
+            )
+            covered_until = history[-1].message_id or ""
+            record = store.upsert_summary(
+                session_id=session.session_id,
+                covered_until_message_id=covered_until,
+                summary=summary,
+            )
+            self._record(
+                session,
+                "conversation_summary_updated",
+                {
+                    "session_id": session.session_id,
+                    "role_id": session.role_id,
+                    "summary_id": record.summary_id,
+                    "covered_until_message_id": record.covered_until_message_id,
+                },
+            )
+        except Exception as summary_error:
+            self._record(
+                session,
+                "conversation_summary_failed",
+                {"session_id": session.session_id, "role_id": session.role_id, "message": str(summary_error)},
             )
 
     def _persist_session(self, session: SessionState, role: RolePackage, now: str) -> None:
@@ -486,6 +565,7 @@ class SessionManager:
             role_version=str(row["role_version"]),
             role_opening=opening,
             config=self.config,
+            title=str(row["title"]) if row["title"] is not None else None,
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             last_message_at=str(row["last_message_at"]) if row["last_message_at"] is not None else None,
@@ -507,6 +587,10 @@ class SessionManager:
             ChatMessage(message_id=str(row["id"]), role=str(row["role"]), content=str(row["content"]))
             for row in rows
         ]
+
+    def _session_summary_text(self, session_id: str) -> str | None:
+        summary = SummaryStore(self.database).get_latest_summary(session_id)
+        return summary.summary if summary is not None else None
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()

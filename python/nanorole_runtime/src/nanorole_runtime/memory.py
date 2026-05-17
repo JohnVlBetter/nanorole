@@ -50,6 +50,13 @@ class MemoryRecord:
 
 
 @dataclass(frozen=True)
+class MemorySourceMessage:
+    message_id: str
+    role: str | None
+    content: str | None
+
+
+@dataclass(frozen=True)
 class ExtractedMemory:
     type: str
     content: str
@@ -107,6 +114,10 @@ def parse_memory_extraction(raw: dict[str, object]) -> MemoryExtraction:
         source_message_ids = item.get("source_message_ids")
         if not isinstance(source_message_ids, list) or not all(isinstance(source, str) for source in source_message_ids):
             raise ValueError("source_message_ids must be a list of strings")
+        clean_source_message_ids = _validate_source_message_ids(
+            source_message_ids,
+            field_name="source_message_ids",
+        )
         _validate_score("importance", importance)
         _validate_score("confidence", confidence)
         memories.append(
@@ -115,7 +126,7 @@ def parse_memory_extraction(raw: dict[str, object]) -> MemoryExtraction:
                 content=content.strip(),
                 importance=importance,
                 confidence=confidence,
-                source_message_ids=list(source_message_ids),
+                source_message_ids=clean_source_message_ids,
             )
         )
 
@@ -144,6 +155,8 @@ class MemoryExtractor:
         assistant_message_id: str,
         assistant_message: str,
     ) -> MemoryExtraction:
+        if _requests_no_memory(user_message):
+            return MemoryExtraction(memories=[], archive_memory_ids=[], relationship_patch=None)
         existing = self.store.list_memories(user_id=user_id, companion_id=companion_id)
         existing_text = "\n".join(f"- {memory.memory_id}: [{memory.type}] {memory.content}" for memory in existing)
         if not existing_text:
@@ -196,6 +209,7 @@ class MemoryStore:
         source_message_ids: list[str],
     ) -> MemoryRecord:
         self._validate(memory_type, content, importance, confidence)
+        clean_source_message_ids = _validate_source_message_ids(source_message_ids)
         memory_id = uuid.uuid4().hex
         now = utc_now()
         with self.database.connect() as connection:
@@ -221,7 +235,7 @@ class MemoryStore:
                     0,
                 ),
             )
-            self._replace_sources(connection, memory_id, source_message_ids)
+            self._replace_sources(connection, memory_id, clean_source_message_ids)
         return self.get_memory(memory_id)
 
     def list_memories(
@@ -268,6 +282,11 @@ class MemoryStore:
         next_confidence = confidence if confidence is not None else current.confidence
         next_status = status or current.status
         self._validate(next_type, next_content, next_importance, next_confidence)
+        clean_source_message_ids = (
+            _validate_source_message_ids(source_message_ids)
+            if source_message_ids is not None
+            else None
+        )
         if next_status not in VALID_MEMORY_STATUS:
             raise ValueError(f"invalid memory status: {next_status}")
         now = utc_now()
@@ -288,8 +307,8 @@ class MemoryStore:
                     memory_id,
                 ),
             )
-            if source_message_ids is not None:
-                self._replace_sources(connection, memory_id, source_message_ids)
+            if clean_source_message_ids is not None:
+                self._replace_sources(connection, memory_id, clean_source_message_ids)
         return self.get_memory(memory_id)
 
     def archive_memory(self, memory_id: str) -> MemoryRecord:
@@ -420,6 +439,26 @@ class MemoryStore:
         if state is None:
             raise KeyError((user_id, companion_id))
         return state
+
+    def get_source_messages(self, memory_id: str) -> list[MemorySourceMessage]:
+        rows = self.database.fetch_all(
+            """
+            select memory_sources.message_id, messages.role, messages.content
+            from memory_sources
+            left join messages on messages.id = memory_sources.message_id
+            where memory_sources.memory_id = ?
+            order by memory_sources.message_id
+            """,
+            (memory_id,),
+        )
+        return [
+            MemorySourceMessage(
+                message_id=str(row["message_id"]),
+                role=str(row["role"]) if row["role"] is not None else None,
+                content=str(row["content"]) if row["content"] is not None else None,
+            )
+            for row in rows
+        ]
 
     def apply_relationship_patch(
         self,
@@ -553,3 +592,26 @@ def _optional_float(value: object, default: float) -> float:
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _validate_source_message_ids(source_message_ids: list[str], *, field_name: str = "source message ids") -> list[str]:
+    cleaned = [source.strip() for source in source_message_ids if source.strip()]
+    if not cleaned or len(cleaned) != len(source_message_ids):
+        raise ValueError(f"{field_name} must include at least one source message id")
+    return list(dict.fromkeys(cleaned))
+
+
+def _requests_no_memory(message: str) -> bool:
+    normalized = message.lower()
+    phrases = [
+        "do not remember this",
+        "don't remember this",
+        "do not save this",
+        "don't save this",
+        "do not store this",
+        "don't store this",
+        "不要记住",
+        "别记住",
+        "不要保存",
+    ]
+    return any(phrase in normalized for phrase in phrases)

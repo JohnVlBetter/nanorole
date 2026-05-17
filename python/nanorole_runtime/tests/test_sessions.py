@@ -6,6 +6,7 @@ import pytest
 
 from nanorole_runtime.config import load_config
 from nanorole_runtime.llm import ChatClient
+from nanorole_runtime.memory import MemoryStore
 from nanorole_runtime.roles import RolePackage
 from nanorole_runtime.sessions import SessionManager
 
@@ -23,6 +24,9 @@ class StubClient(ChatClient):
             on_first_token(56.78)
         for chunk in self.chunks:
             yield chunk
+
+    async def complete_json(self, *, messages, config):
+        return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
 
 
 @pytest.fixture
@@ -58,6 +62,27 @@ def create_role_file(path: Path, role: RolePackage) -> None:
         ),
         encoding="utf-8",
     )
+
+
+async def wait_until(predicate, *, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition was not met before timeout")
+
+
+async def test_update_session_mutates_title_and_status(tmp_path: Path, role: RolePackage) -> None:
+    create_role_file(tmp_path, role)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=StubClient(["hello"]))
+    session = manager.create_session(role.id)
+
+    updated = manager.update_session(session.session_id, title="Evening check-in", status="archived")
+
+    assert updated.title == "Evening check-in"
+    assert updated.status == "archived"
+    assert manager.get_session(session.session_id).title == "Evening check-in"
 
 
 async def test_sessions_keep_history_and_exports_isolated(tmp_path: Path, role: RolePackage) -> None:
@@ -177,3 +202,104 @@ async def test_slow_memory_extraction_does_not_block_final_stream_event(tmp_path
 
     assert token.type == "token"
     assert final.type == "final"
+
+
+async def test_stream_message_background_extraction_writes_durable_memory(tmp_path: Path, role: RolePackage) -> None:
+    class ExtractingClient(ChatClient):
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            yield "noted"
+
+        async def complete_json(self, *, messages, config):
+            prompt = messages[-1]["content"]
+            user_message_id = next(line.split(": ", 1)[1] for line in prompt.splitlines() if line.startswith("user_message_id: "))
+            return {
+                "memories": [
+                    {
+                        "type": "preference",
+                        "content": "The user prefers calm check-ins.",
+                        "importance": 0.8,
+                        "confidence": 0.9,
+                        "source_message_ids": [user_message_id],
+                    }
+                ],
+                "archive_memory_ids": [],
+                "relationship_patch": None,
+            }
+
+    create_role_file(tmp_path, role)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=ExtractingClient())
+    session = manager.create_session(role.id)
+
+    events = [event async for event in manager.stream_message(session.session_id, "Please remember that I prefer calm check-ins.")]
+    store = MemoryStore(manager.database)
+    await wait_until(lambda: len(store.list_memories(user_id="local-user", companion_id=role.id)) == 1)
+
+    memories = store.list_memories(user_id="local-user", companion_id=role.id)
+    assert events[-1].type == "final"
+    assert memories[0].content == "The user prefers calm check-ins."
+    assert len(memories[0].source_message_ids) == 1
+
+
+async def test_do_not_remember_this_skips_memory_extraction(tmp_path: Path, role: RolePackage) -> None:
+    class PrivacyClient(ChatClient):
+        def __init__(self) -> None:
+            self.extraction_calls = 0
+
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            yield "understood"
+
+        async def complete_json(self, *, messages, config):
+            self.extraction_calls += 1
+            return {
+                "memories": [
+                    {
+                        "type": "preference",
+                        "content": "The user likes cola.",
+                        "importance": 0.8,
+                        "confidence": 0.9,
+                        "source_message_ids": ["m1"],
+                    }
+                ],
+                "archive_memory_ids": [],
+                "relationship_patch": None,
+            }
+
+    create_role_file(tmp_path, role)
+    client = PrivacyClient()
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=client)
+    session = manager.create_session(role.id)
+
+    _ = [event async for event in manager.stream_message(session.session_id, "Do not remember this: I like cola.")]
+    await asyncio.sleep(0.05)
+
+    store = MemoryStore(manager.database)
+    assert client.extraction_calls == 0
+    assert store.list_memories(user_id="local-user", companion_id=role.id) == []
+
+
+async def test_stream_message_updates_conversation_summary(tmp_path: Path, role: RolePackage) -> None:
+    class SummaryClient(ChatClient):
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            yield "reply"
+
+        async def complete_json(self, *, messages, config):
+            if "Summarize the conversation" in messages[0]["content"]:
+                return {"summary": "The user is checking in regularly and prefers calm pacing."}
+            return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
+    create_role_file(tmp_path, role)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=SummaryClient())
+    session = manager.create_session(role.id)
+
+    for index in range(6):
+        _ = [event async for event in manager.stream_message(session.session_id, f"Turn {index}")]
+
+    await wait_until(
+        lambda: manager.database.fetch_one("select summary from conversation_summaries where session_id = ?", (session.session_id,))
+        is not None
+    )
+    preview = manager.preview_context(session.session_id, user_input="Continue?")
+    system = preview["messages"][0]["content"]
+
+    assert "Current session summary:" in system
+    assert "The user is checking in regularly and prefers calm pacing." in system

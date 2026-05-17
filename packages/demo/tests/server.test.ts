@@ -130,6 +130,11 @@ describe("demo server", () => {
 
     await fetch(`${baseUrl}/api/sessions`);
     await fetch(`${baseUrl}/api/sessions/s1`);
+    await fetch(`${baseUrl}/api/sessions/s1`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Evening", status: "archived" })
+    });
     await fetch(`${baseUrl}/api/sessions/s1/messages`);
     await fetch(`${baseUrl}/api/sessions/s1/context-preview?userInput=hello`);
     await fetch(`${baseUrl}/api/memories?userId=local-user&companionId=demo`);
@@ -148,6 +153,7 @@ describe("demo server", () => {
     expect(seen).toEqual([
       "GET /v1/sessions",
       "GET /v1/sessions/s1",
+      'PATCH /v1/sessions/s1 {"title":"Evening","status":"archived"}',
       "GET /v1/sessions/s1/messages",
       "GET /v1/sessions/s1/context-preview?userInput=hello",
       "GET /v1/memories?userId=local-user&companionId=demo",
@@ -155,5 +161,15 @@ describe("demo server", () => {
       'PATCH /v1/memories/m1 {"content":"y"}',
       "DELETE /v1/memories/m1"
     ]);
+  });
+
+  test("renders source message content in memory cards", async () => {
+    const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
+    const baseUrl = await listen(demo);
+
+    const html = await fetch(`${baseUrl}/memories`).then((response) => response.text());
+
+    expect(html).toContain("sourceMessages");
+    expect(html).toContain("source.content");
   });
 });

@@ -317,6 +317,8 @@ export const MEMORIES_HTML = `<!doctype html>
     .memory { display: grid; gap: 8px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 7px; background: var(--panel); padding: 12px; }
     .memory header { position: static; display: flex; padding: 0; border: 0; background: transparent; }
     .memory textarea { min-height: 64px; }
+    .sources { display: grid; gap: 4px; }
+    .source-line { overflow-wrap: anywhere; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; background: var(--accent-soft); color: var(--accent); padding: 3px 8px; font-size: 12px; font-weight: 700; }
     pre { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: Consolas, monospace; font-size: 12px; line-height: 18px; }
@@ -404,6 +406,26 @@ export const MEMORIES_HTML = `<!doctype html>
       panel.querySelector(".muted").textContent = "Selected memories: " + ((data.usedMemories || []).map((item) => item.memoryId).join(", ") || "-");
       memoriesEl.prepend(panel);
     }
+    function renderSources(container, memory) {
+      container.replaceChildren();
+      const label = document.createElement("div");
+      label.textContent = "Sources:";
+      container.append(label);
+      const sourceMessages = Array.isArray(memory.sourceMessages) ? memory.sourceMessages : [];
+      if (!sourceMessages.length) {
+        const fallback = document.createElement("div");
+        fallback.className = "source-line";
+        fallback.textContent = ((memory.sourceMessageIds || []).join(", ") || "-");
+        container.append(fallback);
+        return;
+      }
+      for (const source of sourceMessages) {
+        const line = document.createElement("div");
+        line.className = "source-line";
+        line.textContent = (source.role || "message") + ": " + (source.content || source.messageId);
+        container.append(line);
+      }
+    }
     function memoryCard(memory) {
       const card = document.createElement("article");
       card.className = "memory";
@@ -417,7 +439,7 @@ export const MEMORIES_HTML = `<!doctype html>
       card.querySelector(".content").value = memory.content;
       card.querySelector(".importance").value = memory.importance;
       card.querySelector(".confidence").value = memory.confidence;
-      card.querySelector(".sources").textContent = "Sources: " + ((memory.sourceMessageIds || []).join(", ") || "-");
+      renderSources(card.querySelector(".sources"), memory);
       card.querySelector(".save").onclick = () => updateMemory(memory.memoryId, {
         content: card.querySelector(".content").value,
         importance: Number(card.querySelector(".importance").value),

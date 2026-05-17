@@ -25,6 +25,7 @@ class ContextAssembler:
         companion_id: str,
         history: list[ChatMessage],
         user_input: str,
+        session_summary: str | None = None,
     ) -> tuple[list[dict[str, str]], list[MemoryRecord]]:
         memories = self._retrieve_memories(
             user_id=user_id,
@@ -32,7 +33,12 @@ class ContextAssembler:
             query=f"{self._recent_text(history)}\n{user_input}",
         )
         relationship = self.memory_store.get_relationship_state(user_id=user_id, companion_id=companion_id)
-        system = self._system_prompt(role=role, memories=memories, relationship=relationship)
+        system = self._system_prompt(
+            role=role,
+            memories=memories,
+            relationship=relationship,
+            session_summary=session_summary,
+        )
         messages = [{"role": "system", "content": system}]
         messages.extend({"role": item.role, "content": item.content} for item in history[-20:])
         messages.append({"role": "user", "content": user_input})
@@ -60,11 +66,13 @@ class ContextAssembler:
         role: RolePackage,
         memories: list[MemoryRecord],
         relationship: RelationshipState | None,
+        session_summary: str | None,
     ) -> str:
         memory_text = "\n".join(f"- [{memory.type}] {memory.content}" for memory in memories)
         if not memory_text:
             memory_text = "- No relevant long-term memories selected."
         relationship_text = self._relationship_text(relationship)
+        session_summary_text = session_summary.strip() if session_summary and session_summary.strip() else "No current session summary recorded yet."
         goals = "\n".join(f"- {goal}" for goal in role.goals)
         safety_rules = "\n".join(f"- {rule}" for rule in role.safety_rules) if role.safety_rules else "- Follow general safety constraints."
         return f"""You are running an emotional companion character for Nanorole.
@@ -95,6 +103,9 @@ Safety Rules:
 
 Relationship state:
 {relationship_text}
+
+Current session summary:
+{session_summary_text}
 
 Long-term memory facts. Treat these as fallible notes controlled by the user:
 {memory_text}

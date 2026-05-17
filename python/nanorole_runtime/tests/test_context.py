@@ -33,7 +33,7 @@ def test_context_includes_relevant_memory(tmp_path: Path) -> None:
         content="The user prefers gentle reminders.",
         importance=0.9,
         confidence=0.9,
-        source_message_ids=[],
+        source_message_ids=["m1"],
     )
 
     assembler = ContextAssembler(memory_store=store)
@@ -43,6 +43,7 @@ def test_context_includes_relevant_memory(tmp_path: Path) -> None:
         companion_id="companion",
         history=[ChatMessage(role="user", content="Can you remind me how to approach this?")],
         user_input="I need motivation without pressure.",
+        session_summary=None,
     )
 
     joined = "\n".join(item["content"] for item in messages)
@@ -61,7 +62,7 @@ def test_deleted_memory_is_excluded_from_context(tmp_path: Path) -> None:
         content="The user likes direct pressure.",
         importance=0.9,
         confidence=0.9,
-        source_message_ids=[],
+        source_message_ids=["m1"],
     )
     store.delete_memory(memory.memory_id)
 
@@ -72,6 +73,7 @@ def test_deleted_memory_is_excluded_from_context(tmp_path: Path) -> None:
         companion_id="companion",
         history=[],
         user_input="Help me plan gently.",
+        session_summary=None,
     )
 
     joined = "\n".join(item["content"] for item in messages)
@@ -100,6 +102,7 @@ def test_context_includes_relationship_state(tmp_path: Path) -> None:
         companion_id="companion",
         history=[],
         user_input="Can we talk for a bit?",
+        session_summary=None,
     )
 
     joined = "\n".join(item["content"] for item in messages)
@@ -118,9 +121,29 @@ def test_context_includes_companion_safety_instruction(tmp_path: Path) -> None:
         companion_id="companion",
         history=[],
         user_input="I need advice.",
+        session_summary=None,
     )
 
     system = messages[0]["content"]
     assert "You are not a therapist, doctor, lawyer, or financial advisor." in system
     assert "Respect user boundaries and corrections." in system
     assert "Do not overuse long-term memories." in system
+
+
+def test_context_includes_current_session_summary(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    assembler = ContextAssembler(memory_store=MemoryStore(database))
+
+    messages, _ = assembler.build_messages(
+        role=role(),
+        user_id="local-user",
+        companion_id="companion",
+        history=[ChatMessage(role="user", content="What did we decide?")],
+        user_input="Can you continue from there?",
+        session_summary="The user prefers calm check-ins and asked to avoid pressure.",
+    )
+
+    system = messages[0]["content"]
+    assert "Current session summary:" in system
+    assert "The user prefers calm check-ins and asked to avoid pressure." in system

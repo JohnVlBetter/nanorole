@@ -23,6 +23,9 @@ class FakeClient(ChatClient):
     ) -> AsyncIterator[str]:
         yield "hello"
 
+    async def complete_json(self, *, messages, config):
+        return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
 
 def write_role(root: Path) -> None:
     role_dir = root / "examples" / "roles" / "companion"
