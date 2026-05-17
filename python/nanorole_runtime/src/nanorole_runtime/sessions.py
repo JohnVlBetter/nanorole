@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator
 from .config import AppConfig, redact_secrets
 from .context import ContextAssembler
 from .llm import ChatClient
-from .memory import MemoryStore
+from .memory import MemoryExtractor, MemoryStore
 from .roles import RolePackage, load_role_by_id
 from .sessions_types import ChatMessage
 from .storage import Database
@@ -196,8 +196,40 @@ class SessionManager:
                 yield StreamEvent("token", {"delta": chunk})
 
             assistant_message = "".join(assistant_parts)
-            session.history.append(self._persist_message(session.session_id, "assistant", assistant_message))
+            assistant_chat_message = self._persist_message(session.session_id, "assistant", assistant_message)
+            session.history.append(assistant_chat_message)
             self._record(session, "assistant_message", {"session_id": session_id, "role_id": session.role_id, "content": assistant_message})
+            try:
+                extractor = MemoryExtractor(client=self.client, config=session.config, store=memory_store)
+                extraction = await extractor.extract_after_turn(
+                    user_id=DEFAULT_USER_ID,
+                    companion_id=role.id,
+                    user_message_id=user_message.message_id or "",
+                    user_message=message,
+                    assistant_message_id=assistant_chat_message.message_id or "",
+                    assistant_message=assistant_message,
+                )
+                written = memory_store.apply_extraction(
+                    user_id=DEFAULT_USER_ID,
+                    companion_id=role.id,
+                    extraction=extraction,
+                )
+                self._record(
+                    session,
+                    "memory_extraction",
+                    {
+                        "session_id": session_id,
+                        "role_id": session.role_id,
+                        "memory_ids": [memory.memory_id for memory in written],
+                        "archived_memory_ids": extraction.archive_memory_ids,
+                    },
+                )
+            except Exception as extraction_error:
+                self._record(
+                    session,
+                    "memory_extraction_failed",
+                    {"session_id": session_id, "role_id": session.role_id, "message": str(extraction_error)},
+                )
             self._write_log(
                 "request_completed",
                 {
