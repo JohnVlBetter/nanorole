@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import AppConfig
 from .llm import ChatClient, OpenAICompatibleClient
@@ -33,6 +33,11 @@ class StreamMessageRequest(BaseModel):
 class UpdateSessionRequest(BaseModel):
     title: str | None = None
     status: str | None = None
+
+
+class AppendStoryEventRequest(BaseModel):
+    type: str
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateMemoryRequest(BaseModel):
@@ -148,6 +153,15 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
             return manager.get_story_state(session_id)
         except SessionNotFoundError as error:
             raise HTTPException(status_code=404, detail=f"story state not found: {session_id}") from error
+
+    @app.post("/v1/sessions/{session_id}/events")
+    def append_story_event(session_id: str, request: AppendStoryEventRequest) -> dict[str, object]:
+        try:
+            return manager.append_story_event(session_id, request.type, request.payload)
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=f"story state not found: {session_id}") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/v1/memories")
     def list_memories(userId: str = DEFAULT_USER_ID, companionId: str = "") -> dict[str, list[dict[str, object]]]:

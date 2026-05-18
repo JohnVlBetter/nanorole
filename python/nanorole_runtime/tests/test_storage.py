@@ -114,6 +114,19 @@ def test_database_migrates_legacy_sessions_for_scenario_metadata(tmp_path: Path)
     assert row["scenario_id"] is None
 
 
+def test_database_creates_scene_events_table(tmp_path: Path) -> None:
+    db = Database(tmp_path / "nanorole.sqlite3")
+
+    db.initialize()
+    db.initialize()
+
+    columns = {str(row["name"]) for row in db.fetch_all("pragma table_info(scene_events)")}
+    migration_ids = {str(row["id"]) for row in db.fetch_all("select id from schema_migrations order by id")}
+
+    assert {"id", "session_id", "type", "payload_json", "created_at", "ordinal"} <= columns
+    assert "0004_scene_events" in migration_ids
+
+
 def test_database_creates_parent_directory(tmp_path: Path) -> None:
     db_path = tmp_path / "nested" / "state" / "nanorole.sqlite3"
     db = Database(db_path)

@@ -203,3 +203,39 @@ def test_context_includes_current_session_summary(tmp_path: Path) -> None:
     system = messages[0]["content"]
     assert "Current session summary:" in system
     assert "The user prefers calm check-ins and asked to avoid pressure." in system
+
+
+def test_context_includes_visible_story_state_without_hidden_facts(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    assembler = ContextAssembler(memory_store=MemoryStore(database))
+
+    messages, _ = assembler.build_messages(
+        role=role(),
+        user_id="local-user",
+        companion_id="companion",
+        history=[],
+        user_input="What can I inspect?",
+        session_summary=None,
+        story_context={
+            "currentScene": "The archive door is now open.",
+            "currentState": {"phase": "investigation"},
+            "publicFacts": [{"id": "public-1", "content": "The public clock stopped at midnight."}],
+            "revealedClues": [{"id": "clue-1", "content": "A bent brass key rests under the dial."}],
+            "recentEvents": [
+                {
+                    "type": "state_changed",
+                    "payload": {"summary": "The archive door opened after the dial was inspected."},
+                }
+            ],
+            "hiddenFacts": [{"id": "hidden-1", "content": "The clock was stopped from inside the archive room."}],
+        },
+    )
+
+    system = messages[0]["content"]
+    assert "Story state:" in system
+    assert "The archive door is now open." in system
+    assert "The public clock stopped at midnight." in system
+    assert "A bent brass key rests under the dial." in system
+    assert "The archive door opened after the dial was inspected." in system
+    assert "The clock was stopped from inside the archive room." not in system

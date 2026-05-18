@@ -82,6 +82,16 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     );
     return;
   }
+  const storyStateMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/story-state$/);
+  if (request.method === "GET" && storyStateMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(storyStateMatch[1]))}/story-state`);
+    return;
+  }
+  const storyEventsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/events$/);
+  if (request.method === "POST" && storyEventsMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(storyEventsMatch[1]))}/events`);
+    return;
+  }
   const streamMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages:stream$/);
   if (request.method === "POST" && streamMatch) {
     await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(streamMatch[1]))}/messages:stream`);

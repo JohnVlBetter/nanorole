@@ -171,10 +171,29 @@ def _apply_scenario_sessions(connection: sqlite3.Connection) -> None:
     )
 
 
+def _apply_scene_events(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        create table if not exists scene_events (
+          id text primary key,
+          session_id text not null,
+          type text not null,
+          payload_json text not null,
+          created_at text not null,
+          ordinal integer not null
+        );
+
+        create index if not exists idx_scene_events_session_ordinal
+        on scene_events(session_id, ordinal);
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("0001_initial_schema", _apply_initial_schema),
     ("0002_message_metadata", _apply_message_metadata),
     ("0003_scenario_sessions", _apply_scenario_sessions),
+    ("0004_scene_events", _apply_scene_events),
 )
 
 
