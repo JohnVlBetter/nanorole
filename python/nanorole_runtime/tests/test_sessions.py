@@ -158,6 +158,116 @@ async def test_session_manager_creates_scenario_session_with_participants_and_in
     assert state["initialState"]["phase"] == "opening"
 
 
+async def test_story_state_changes_when_story_event_is_appended(tmp_path: Path, role: RolePackage) -> None:
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=StubClient(["hello"]))
+    session = manager.create_scenario_session("forgotten-observatory")
+
+    event = manager.append_story_event(
+        session.session_id,
+        "state_changed",
+        {
+            "currentScene": "The archive door is now open.",
+            "statePatch": {"phase": "investigation", "clock": "stopped"},
+        },
+    )
+    state = manager.get_story_state(session.session_id)
+
+    assert event["type"] == "state_changed"
+    assert event["ordinal"] == 0
+    assert state["currentScene"] == "The archive door is now open."
+    assert state["currentState"]["phase"] == "investigation"
+    assert state["recentEvents"][0]["eventId"] == event["eventId"]
+    assert state["recentEvents"][0]["payload"]["statePatch"]["phase"] == "investigation"
+
+
+async def test_clue_revealed_event_updates_story_state(tmp_path: Path, role: RolePackage) -> None:
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=StubClient(["hello"]))
+    session = manager.create_scenario_session("forgotten-observatory")
+
+    event = manager.append_story_event(session.session_id, "clue_revealed", {"clueId": "clue-1"})
+    state = manager.get_story_state(session.session_id)
+
+    assert state["clues"][0]["status"] == "revealed"
+    assert state["clues"][0]["sourceEventId"] == event["eventId"]
+    assert state["revealedClues"][0]["id"] == "clue-1"
+
+
+async def test_context_preview_includes_visible_story_state_without_hidden_facts(
+    tmp_path: Path,
+    role: RolePackage,
+) -> None:
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=StubClient(["hello"]))
+    session = manager.create_scenario_session("forgotten-observatory")
+    manager.append_story_event(session.session_id, "clue_revealed", {"clueId": "clue-1"})
+    manager.append_story_event(
+        session.session_id,
+        "state_changed",
+        {
+            "currentScene": "The archive door is now open.",
+            "statePatch": {"phase": "investigation"},
+            "summary": "The archive door opened after the dial was inspected.",
+        },
+    )
+
+    preview = manager.preview_context(session.session_id, user_input="What can I inspect?")
+    system = preview["messages"][0]["content"]
+
+    assert "Story state:" in system
+    assert "The archive door is now open." in system
+    assert "The public clock stopped at midnight." in system
+    assert "A bent brass key rests under the dial." in system
+    assert "The archive door opened after the dial was inspected." in system
+    assert "The clock was stopped from inside the archive room." not in system
+    assert preview["usedStory"]["publicFacts"][0]["id"] == "public-1"
+    assert preview["usedStory"]["revealedClues"][0]["id"] == "clue-1"
+    assert preview["usedStory"]["recentEvents"][-1]["type"] == "state_changed"
+
+
 async def test_sessions_keep_history_and_exports_isolated(tmp_path: Path, role: RolePackage) -> None:
     create_role_file(tmp_path, role)
     config = load_config(repo_root=tmp_path)

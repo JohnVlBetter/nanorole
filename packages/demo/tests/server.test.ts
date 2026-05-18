@@ -211,6 +211,33 @@ describe("demo server", () => {
     ]);
   });
 
+  test("proxies story event append endpoint to Python core", async () => {
+    const seen: string[] = [];
+    const runtime = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      const body = await new Promise<string>((resolve) => {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      });
+      seen.push(`${request.method} ${request.url} ${body}`.trim());
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ ok: true }));
+    });
+    const runtimeUrl = await listen(runtime);
+    const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl });
+    const baseUrl = await listen(demo);
+
+    await fetch(`${baseUrl}/api/sessions/s1/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "state_changed", payload: { statePatch: { phase: "investigation" } } })
+    });
+
+    expect(seen).toEqual([
+      'POST /v1/sessions/s1/events {"type":"state_changed","payload":{"statePatch":{"phase":"investigation"}}}'
+    ]);
+  });
+
   test("renders source message content in memory cards", async () => {
     const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
     const baseUrl = await listen(demo);

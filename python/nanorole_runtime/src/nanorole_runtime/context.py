@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .memory import MemoryRecord, MemoryStore, RelationshipState
 from .roles import RolePackage
@@ -26,6 +27,7 @@ class ContextAssembler:
         history: list[ChatMessage],
         user_input: str,
         session_summary: str | None = None,
+        story_context: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], list[MemoryRecord]]:
         memories = self._retrieve_memories(
             user_id=user_id,
@@ -38,6 +40,7 @@ class ContextAssembler:
             memories=memories,
             relationship=relationship,
             session_summary=session_summary,
+            story_context=story_context,
         )
         messages = [{"role": "system", "content": system}]
         messages.extend({"role": item.role, "content": item.content} for item in history[-20:])
@@ -67,12 +70,14 @@ class ContextAssembler:
         memories: list[MemoryRecord],
         relationship: RelationshipState | None,
         session_summary: str | None,
+        story_context: dict[str, Any] | None,
     ) -> str:
         memory_text = "\n".join(f"- [{memory.type}] {memory.content}" for memory in memories)
         if not memory_text:
             memory_text = "- No relevant long-term memories selected."
         relationship_text = self._relationship_text(relationship)
         session_summary_text = session_summary.strip() if session_summary and session_summary.strip() else "No current session summary recorded yet."
+        story_section = f"\n\nStory state:\n{self._story_text(story_context)}" if story_context else ""
         goals = "\n".join(f"- {goal}" for goal in role.goals)
         safety_rules = "\n".join(f"- {rule}" for rule in role.safety_rules) if role.safety_rules else "- Follow general safety constraints."
         return f"""You are running an emotional companion character for Nanorole.
@@ -105,7 +110,7 @@ Relationship state:
 {relationship_text}
 
 Current session summary:
-{session_summary_text}
+{session_summary_text}{story_section}
 
 Long-term memory facts. Treat these as fallible notes controlled by the user:
 {memory_text}
@@ -125,3 +130,53 @@ Long-term memory facts. Treat these as fallible notes controlled by the user:
         if relationship.communication_style:
             lines.append(f"Communication style: {relationship.communication_style}")
         return "\n".join(lines)
+
+    def _story_text(self, story_context: dict[str, Any] | None) -> str:
+        if not story_context:
+            return "No scenario story state is active."
+        lines = [f"Current scene: {story_context.get('currentScene') or 'Unknown.'}"]
+        current_state = story_context.get("currentState")
+        if isinstance(current_state, dict) and current_state:
+            state_text = ", ".join(f"{key}={value}" for key, value in sorted(current_state.items()))
+            lines.append(f"Current state: {state_text}")
+        public_facts = self._content_lines(story_context.get("publicFacts"))
+        if public_facts:
+            lines.append("Public facts:")
+            lines.extend(f"- {line}" for line in public_facts)
+        revealed_clues = self._content_lines(story_context.get("revealedClues"))
+        if revealed_clues:
+            lines.append("Revealed clues:")
+            lines.extend(f"- {line}" for line in revealed_clues)
+        recent_events = self._event_lines(story_context.get("recentEvents"))
+        if recent_events:
+            lines.append("Recent story events:")
+            lines.extend(f"- {line}" for line in recent_events)
+        return "\n".join(lines)
+
+    def _content_lines(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        lines: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                content = item.get("content") or item.get("summary")
+                if content:
+                    lines.append(str(content))
+            elif item:
+                lines.append(str(item))
+        return lines
+
+    def _event_lines(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        lines: list[str] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            summary = payload.get("summary") or payload.get("description") or payload.get("currentScene")
+            if summary:
+                lines.append(f"{item.get('type', 'event')}: {summary}")
+            else:
+                lines.append(str(item.get("type", "event")))
+        return lines

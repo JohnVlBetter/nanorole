@@ -82,6 +82,11 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     );
     return;
   }
+  const storyEventsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/events$/);
+  if (request.method === "POST" && storyEventsMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(storyEventsMatch[1]))}/events`);
+    return;
+  }
   const streamMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages:stream$/);
   if (request.method === "POST" && streamMatch) {
     await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions/${encodeURIComponent(decodeURIComponent(streamMatch[1]))}/messages:stream`);

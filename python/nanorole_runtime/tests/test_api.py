@@ -178,6 +178,35 @@ def test_fastapi_scenario_routes_and_create_session(tmp_path: Path) -> None:
     assert story_state.json()["initialState"]["phase"] == "opening"
 
 
+def test_fastapi_appends_story_events_and_updates_story_state(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    write_neko_role(tmp_path)
+    write_scenario(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+    session_id = client.post("/v1/sessions", json={"mode": "scenario", "scenarioId": "forgotten-observatory"}).json()["sessionId"]
+
+    appended = client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "state_changed",
+            "payload": {
+                "currentScene": "The archive door is now open.",
+                "statePatch": {"phase": "investigation"},
+            },
+        },
+    )
+    story_state = client.get(f"/v1/sessions/{session_id}/story-state")
+
+    assert appended.status_code == 200
+    assert appended.json()["eventId"]
+    assert appended.json()["type"] == "state_changed"
+    assert appended.json()["ordinal"] == 0
+    assert story_state.json()["currentScene"] == "The archive door is now open."
+    assert story_state.json()["currentState"]["phase"] == "investigation"
+    assert story_state.json()["recentEvents"][0]["eventId"] == appended.json()["eventId"]
+
+
 def test_fastapi_route_updates_session_title_and_status(tmp_path: Path) -> None:
     write_role(tmp_path)
     app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())

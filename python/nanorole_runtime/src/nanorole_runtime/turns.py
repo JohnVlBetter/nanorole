@@ -37,6 +37,7 @@ class CompanionTurnPipeline:
         user_id: str,
         companion_id: str,
         session_summary: str | None,
+        story_context: dict[str, Any] | None,
         memory_store: MemoryStore,
         persist_message: PersistMessage,
         record_event: RecordEvent,
@@ -52,6 +53,7 @@ class CompanionTurnPipeline:
         self.user_id = user_id
         self.companion_id = companion_id
         self.session_summary = session_summary
+        self.story_context = story_context
         self.memory_store = memory_store
         self.persist_message = persist_message
         self.record_event = record_event
@@ -115,6 +117,7 @@ class CompanionTurnPipeline:
                 history=self.history[:-1],
                 user_input=user_input,
                 session_summary=self.session_summary,
+                story_context=self.story_context,
             )
             used_memory_ids = [memory.memory_id for memory in used_memories]
             self.memory_store.mark_used(used_memory_ids)
