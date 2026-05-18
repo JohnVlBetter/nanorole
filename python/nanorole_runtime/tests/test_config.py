@@ -52,6 +52,7 @@ NANOROLE_MODEL=from-env-file
     assert config.logging.trace_requests is True
     assert config.paths.logs_dir == tmp_path / "custom" / "logs"
     assert config.paths.sessions_dir == tmp_path / "custom" / "sessions"
+    assert config.paths.scenarios_dir == tmp_path / "examples" / "scenarios"
 
 
 def test_redact_secrets_masks_api_keys_and_authorization_headers() -> None:

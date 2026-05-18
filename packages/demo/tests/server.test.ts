@@ -180,6 +180,37 @@ describe("demo server", () => {
     ]);
   });
 
+  test("proxies scenario endpoints and scenario session creation to Python core", async () => {
+    const seen: string[] = [];
+    const runtime = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      const body = request.method === "GET" ? "" : await new Promise<string>((resolve) => {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      });
+      seen.push(`${request.method} ${request.url} ${body}`.trim());
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ ok: true }));
+    });
+    const runtimeUrl = await listen(runtime);
+    const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl });
+    const baseUrl = await listen(demo);
+
+    await fetch(`${baseUrl}/api/scenarios`);
+    await fetch(`${baseUrl}/api/scenarios/forgotten-observatory`);
+    await fetch(`${baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "scenario", scenarioId: "forgotten-observatory" })
+    });
+
+    expect(seen).toEqual([
+      "GET /v1/scenarios",
+      "GET /v1/scenarios/forgotten-observatory",
+      'POST /v1/sessions {"mode":"scenario","scenarioId":"forgotten-observatory"}'
+    ]);
+  });
+
   test("renders source message content in memory cards", async () => {
     const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
     const baseUrl = await listen(demo);

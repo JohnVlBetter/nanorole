@@ -37,6 +37,9 @@ create table if not exists sessions (
   role_id text not null,
   role_name text not null,
   role_version text not null,
+  mode text not null default 'companion',
+  scenario_id text,
+  scenario_name text,
   title text,
   status text not null,
   created_at text not null,
@@ -118,6 +121,12 @@ MESSAGE_METADATA_COLUMNS = {
     "audio_ref": "audio_ref text",
 }
 
+SESSION_SCENARIO_COLUMNS = {
+    "mode": "mode text not null default 'companion'",
+    "scenario_id": "scenario_id text",
+    "scenario_name": "scenario_name text",
+}
+
 Migration = tuple[str, Callable[[sqlite3.Connection], None]]
 
 
@@ -132,9 +141,40 @@ def _apply_message_metadata(connection: sqlite3.Connection) -> None:
             connection.execute(f"alter table messages add column {definition}")
 
 
+def _apply_scenario_sessions(connection: sqlite3.Connection) -> None:
+    existing_columns = _column_names(connection, "sessions")
+    for column_name, definition in SESSION_SCENARIO_COLUMNS.items():
+        if column_name not in existing_columns:
+            connection.execute(f"alter table sessions add column {definition}")
+    connection.executescript(
+        """
+        create table if not exists session_participants (
+          session_id text not null,
+          role_id text not null,
+          display_name text not null,
+          ordinal integer not null,
+          primary key (session_id, role_id)
+        );
+
+        create index if not exists idx_session_participants_session_ordinal
+        on session_participants(session_id, ordinal);
+
+        create table if not exists story_states (
+          session_id text primary key,
+          scenario_id text not null,
+          state_json text not null,
+          current_scene text not null,
+          created_at text not null,
+          updated_at text not null
+        );
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("0001_initial_schema", _apply_initial_schema),
     ("0002_message_metadata", _apply_message_metadata),
+    ("0003_scenario_sessions", _apply_scenario_sessions),
 )
 
 

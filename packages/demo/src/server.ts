@@ -46,6 +46,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     sendJson(response, 200, { logs: await readRuntimeLogs(join(options.projectRoot, ".nanorole", "logs")) });
     return;
   }
+  if (request.method === "GET" && url.pathname === "/api/scenarios") {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/scenarios`);
+    return;
+  }
+  const scenarioMatch = url.pathname.match(/^\/api\/scenarios\/([^/]+)$/);
+  if (request.method === "GET" && scenarioMatch) {
+    await proxyRequest(request, response, `${options.runtimeUrl}/v1/scenarios/${encodeURIComponent(decodeURIComponent(scenarioMatch[1]))}`);
+    return;
+  }
   if (request.method === "POST" && url.pathname === "/api/sessions") {
     await proxyRequest(request, response, `${options.runtimeUrl}/v1/sessions`);
     return;

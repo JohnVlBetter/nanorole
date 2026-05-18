@@ -64,6 +64,43 @@ def create_role_file(path: Path, role: RolePackage) -> None:
     )
 
 
+def create_scenario_file(path: Path) -> None:
+    scenario_dir = path / "examples" / "scenarios" / "forgotten-observatory"
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    (scenario_dir / "scenario.yaml").write_text(
+        "\n".join(
+            [
+                "id: forgotten-observatory",
+                "name: Forgotten Observatory",
+                "version: 1.0.0",
+                "description: A stalled observatory clock hides a missing archive.",
+                "mode: mystery",
+                "roles:",
+                "  - clockwork-sage",
+                "  - neko-maid",
+                "world: A brass city where public clocks regulate memory archives.",
+                "initial_scene: The observatory clock has stopped...",
+                "initial_state:",
+                "  phase: opening",
+                "  clock: stopped",
+                "public_facts:",
+                "  - id: public-1",
+                "    content: The public clock stopped at midnight.",
+                "hidden_facts:",
+                "  - id: hidden-1",
+                "    content: The clock was stopped from inside the archive room.",
+                "    visibility:",
+                "      - clockwork-sage",
+                "clues:",
+                "  - id: clue-1",
+                "    content: A bent brass key rests under the dial.",
+                "    status: hidden",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 async def wait_until(predicate, *, timeout: float = 1.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -83,6 +120,42 @@ async def test_update_session_mutates_title_and_status(tmp_path: Path, role: Rol
     assert updated.title == "Evening check-in"
     assert updated.status == "archived"
     assert manager.get_session(session.session_id).title == "Evening check-in"
+
+
+async def test_session_manager_creates_scenario_session_with_participants_and_initial_state(
+    tmp_path: Path,
+    role: RolePackage,
+) -> None:
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=StubClient(["hello"]))
+
+    session = manager.create_scenario_session("forgotten-observatory")
+    loaded = manager.get_session(session.session_id)
+    state = manager.get_story_state(session.session_id)
+
+    assert loaded.mode == "scenario"
+    assert loaded.scenario_id == "forgotten-observatory"
+    assert loaded.scenario_name == "Forgotten Observatory"
+    assert loaded.role_id == "clockwork-sage"
+    assert [participant["roleId"] for participant in loaded.participants] == ["clockwork-sage", "neko-maid"]
+    assert loaded.participants[0]["displayName"] == "Clockwork Sage"
+    assert state["scenarioId"] == "forgotten-observatory"
+    assert state["currentScene"] == "The observatory clock has stopped..."
+    assert state["initialState"]["phase"] == "opening"
 
 
 async def test_sessions_keep_history_and_exports_isolated(tmp_path: Path, role: RolePackage) -> None:

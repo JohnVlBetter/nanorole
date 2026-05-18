@@ -45,6 +45,64 @@ def write_role(tmp_path: Path) -> None:
     (role_dir / "character.yaml").write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_neko_role(tmp_path: Path) -> None:
+    role_dir = tmp_path / "examples" / "roles" / "neko-maid"
+    role_dir.mkdir(parents=True, exist_ok=True)
+    (role_dir / "character.yaml").write_text(
+        "\n".join(
+            [
+                "id: neko-maid",
+                "name: Neko Maid",
+                "version: 1.0.0",
+                "world: A city of brass towers.",
+                "background: Keeps the tea room ledger.",
+                "persona: Warm, direct, alert.",
+                "goals:",
+                "  - Notice small inconsistencies.",
+                "opening: Tea is ready.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_scenario(tmp_path: Path) -> None:
+    scenario_dir = tmp_path / "examples" / "scenarios" / "forgotten-observatory"
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    (scenario_dir / "scenario.yaml").write_text(
+        "\n".join(
+            [
+                "id: forgotten-observatory",
+                "name: Forgotten Observatory",
+                "version: 1.0.0",
+                "description: A stalled observatory clock hides a missing archive.",
+                "mode: mystery",
+                "roles:",
+                "  - clockwork-sage",
+                "  - neko-maid",
+                "world: A brass city where public clocks regulate memory archives.",
+                "initial_scene: The observatory clock has stopped...",
+                "initial_state:",
+                "  phase: opening",
+                "  clock: stopped",
+                "public_facts:",
+                "  - id: public-1",
+                "    content: The public clock stopped at midnight.",
+                "hidden_facts:",
+                "  - id: hidden-1",
+                "    content: The clock was stopped from inside the archive room.",
+                "    visibility:",
+                "      - clockwork-sage",
+                "clues:",
+                "  - id: clue-1",
+                "    content: A bent brass key rests under the dial.",
+                "    status: hidden",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None:
     write_role(tmp_path)
     app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
@@ -63,6 +121,7 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
 
     assert health.json() == {"status": "ok", "service": "nanorole-runtime"}
     assert created.status_code == 200
+    assert created.json()["mode"] == "companion"
     assert created.json()["opening"] == "The gears quiet as you enter."
     assert streamed.status_code == 200
     assert "event: token" in streamed.text
@@ -87,6 +146,36 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
     assert messages.json()["messages"][1]["outputModality"] == "text"
     assert exported.status_code == 200
     assert '"type": "assistant_message"' in exported.text
+
+
+def test_fastapi_scenario_routes_and_create_session(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    write_neko_role(tmp_path)
+    write_scenario(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+
+    listed = client.get("/v1/scenarios")
+    detail = client.get("/v1/scenarios/forgotten-observatory")
+    created = client.post("/v1/sessions", json={"mode": "scenario", "scenarioId": "forgotten-observatory"})
+    session_id = created.json()["sessionId"] if created.status_code == 200 else "missing"
+    fetched = client.get(f"/v1/sessions/{session_id}")
+    story_state = client.get(f"/v1/sessions/{session_id}/story-state")
+
+    assert listed.status_code == 200
+    assert listed.json()["scenarios"][0]["scenarioId"] == "forgotten-observatory"
+    assert listed.json()["scenarios"][0]["roleIds"] == ["clockwork-sage", "neko-maid"]
+    assert detail.status_code == 200
+    assert detail.json()["initialScene"] == "The observatory clock has stopped..."
+    assert detail.json()["initialState"]["phase"] == "opening"
+    assert created.status_code == 200
+    assert created.json()["mode"] == "scenario"
+    assert created.json()["scenarioId"] == "forgotten-observatory"
+    assert created.json()["participants"][0]["roleId"] == "clockwork-sage"
+    assert fetched.status_code == 200
+    assert fetched.json()["participants"][1]["roleId"] == "neko-maid"
+    assert story_state.status_code == 200
+    assert story_state.json()["initialState"]["phase"] == "opening"
 
 
 def test_fastapi_route_updates_session_title_and_status(tmp_path: Path) -> None:

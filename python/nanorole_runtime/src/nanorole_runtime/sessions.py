@@ -12,6 +12,7 @@ from .context import ContextAssembler
 from .llm import ChatClient
 from .memory import MemoryExtractor, MemoryStore
 from .roles import RolePackage, load_role_by_id
+from .scenarios import ScenarioPackage, load_scenario_by_id
 from .sessions_types import ChatMessage
 from .storage import Database
 from .summaries import SummaryStore, generate_session_summary, should_update_summary
@@ -50,6 +51,10 @@ class SessionState:
     role_version: str
     role_opening: str
     config: AppConfig
+    mode: str = "companion"
+    scenario_id: str | None = None
+    scenario_name: str | None = None
+    participants: list[dict[str, Any]] = field(default_factory=list)
     title: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -82,6 +87,7 @@ class SessionManager:
             role_version=role.version,
             role_opening=role.opening,
             config=config or self.config,
+            mode="companion",
             created_at=now,
             updated_at=now,
             last_message_at=None,
@@ -120,12 +126,78 @@ class SessionManager:
         )
         return session
 
+    def create_scenario_session(self, scenario_id: str, role_ids: list[str] | None = None) -> SessionState:
+        scenario = load_scenario_by_id(self.config.paths.scenarios_dir, scenario_id)
+        selected_role_ids = role_ids if role_ids is not None else scenario.roles
+        if not selected_role_ids:
+            raise ValueError("scenario session requires at least one role")
+        roles = [self._resolve_role(role_id) for role_id in selected_role_ids]
+        now = self._now()
+        active_role = roles[0]
+        session = SessionState(
+            session_id=uuid.uuid4().hex,
+            role_id=active_role.id,
+            role_name=active_role.name,
+            role_version=active_role.version,
+            role_opening=scenario.initial_scene,
+            config=self.config,
+            mode="scenario",
+            scenario_id=scenario.id,
+            scenario_name=scenario.name,
+            participants=[
+                {"roleId": role.id, "displayName": role.name, "ordinal": index}
+                for index, role in enumerate(roles)
+            ],
+            created_at=now,
+            updated_at=now,
+            last_message_at=None,
+        )
+        self._persist_session(session, active_role, now)
+        self._persist_session_participants(session.session_id, roles)
+        self._persist_story_state(session.session_id, scenario, now)
+        self._record(
+            session,
+            "scenario_session_started",
+            {
+                "session_id": session.session_id,
+                "scenario_id": scenario.id,
+                "scenario_name": scenario.name,
+                "role_ids": selected_role_ids,
+            },
+        )
+        self._sessions[session.session_id] = session
+        self._write_log(
+            "scenario_session_created",
+            {
+                "session_id": session.session_id,
+                "scenario_id": scenario.id,
+                "role_ids": selected_role_ids,
+            },
+        )
+        return session
+
     def get_session(self, session_id: str) -> SessionState:
         if session_id in self._sessions:
             return self._sessions[session_id]
         session = self._load_session(session_id)
         self._sessions[session.session_id] = session
         return session
+
+    def get_story_state(self, session_id: str) -> dict[str, Any]:
+        self.get_session(session_id)
+        row = self.database.fetch_one("select * from story_states where session_id = ?", (session_id,))
+        if row is None:
+            raise SessionNotFoundError(session_id)
+        state = json.loads(str(row["state_json"]))
+        return {
+            "sessionId": session_id,
+            "scenarioId": str(row["scenario_id"]),
+            "currentScene": str(row["current_scene"]),
+            "initialState": state.get("initialState", {}),
+            "publicFacts": state.get("publicFacts", []),
+            "hiddenFacts": state.get("hiddenFacts", []),
+            "clues": state.get("clues", []),
+        }
 
     def list_sessions(self) -> list[SessionState]:
         rows = self.database.fetch_all(
@@ -419,9 +491,10 @@ class SessionManager:
             connection.execute(
                 """
                 insert into sessions (
-                  id, user_id, companion_id, role_id, role_name, role_version, title, status,
+                  id, user_id, companion_id, role_id, role_name, role_version, mode, scenario_id, scenario_name,
+                  title, status,
                   created_at, updated_at, last_message_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.session_id,
@@ -430,11 +503,48 @@ class SessionManager:
                     role.id,
                     role.name,
                     role.version,
+                    session.mode,
+                    session.scenario_id,
+                    session.scenario_name,
                     None,
                     "active",
                     now,
                     now,
                     None,
+                ),
+            )
+
+    def _persist_session_participants(self, session_id: str, roles: list[RolePackage]) -> None:
+        with self.database.connect() as connection:
+            for index, role in enumerate(roles):
+                connection.execute(
+                    """
+                    insert into session_participants (session_id, role_id, display_name, ordinal)
+                    values (?, ?, ?, ?)
+                    """,
+                    (session_id, role.id, role.name, index),
+                )
+
+    def _persist_story_state(self, session_id: str, scenario: ScenarioPackage, now: str) -> None:
+        payload = {
+            "initialState": scenario.initial_state,
+            "publicFacts": scenario.public_facts,
+            "hiddenFacts": scenario.hidden_facts,
+            "clues": scenario.clues,
+        }
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                insert into story_states (session_id, scenario_id, state_json, current_scene, created_at, updated_at)
+                values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    scenario.id,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    scenario.initial_scene,
+                    now,
+                    now,
                 ),
             )
 
@@ -521,6 +631,10 @@ class SessionManager:
             role_version=str(row["role_version"]),
             role_opening=opening,
             config=self.config,
+            mode=str(row["mode"]),
+            scenario_id=str(row["scenario_id"]) if row["scenario_id"] is not None else None,
+            scenario_name=str(row["scenario_name"]) if row["scenario_name"] is not None else None,
+            participants=self._load_participants(str(row["id"])),
             title=str(row["title"]) if row["title"] is not None else None,
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
@@ -528,6 +642,25 @@ class SessionManager:
             status=str(row["status"]),
             history=history,
         )
+
+    def _load_participants(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self.database.fetch_all(
+            """
+            select role_id, display_name, ordinal
+            from session_participants
+            where session_id = ?
+            order by ordinal
+            """,
+            (session_id,),
+        )
+        return [
+            {
+                "roleId": str(row["role_id"]),
+                "displayName": str(row["display_name"]),
+                "ordinal": int(row["ordinal"]),
+            }
+            for row in rows
+        ]
 
     def _load_messages(self, session_id: str) -> list[ChatMessage]:
         rows = self.database.fetch_all(

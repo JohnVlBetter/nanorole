@@ -66,6 +66,54 @@ def test_database_migrates_legacy_message_table(tmp_path: Path) -> None:
     assert row["input_modality"] is None
 
 
+def test_database_migrates_legacy_sessions_for_scenario_metadata(tmp_path: Path) -> None:
+    db_path = tmp_path / "nanorole.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            create table sessions (
+              id text primary key,
+              user_id text not null,
+              companion_id text not null,
+              role_id text not null,
+              role_name text not null,
+              role_version text not null,
+              title text,
+              status text not null,
+              created_at text not null,
+              updated_at text not null,
+              last_message_at text
+            );
+
+            insert into sessions (
+              id, user_id, companion_id, role_id, role_name, role_version, title, status,
+              created_at, updated_at, last_message_at
+            ) values (
+              's1', 'local-user', 'clockwork-sage', 'clockwork-sage', 'Clockwork Sage', '1.0.0',
+              null, 'active', '2026-05-17T00:00:00+00:00', '2026-05-17T00:00:00+00:00', null
+            );
+            """
+        )
+
+    db = Database(db_path)
+    db.initialize()
+    db.initialize()
+
+    session_columns = {str(row["name"]) for row in db.fetch_all("pragma table_info(sessions)")}
+    participant_columns = {str(row["name"]) for row in db.fetch_all("pragma table_info(session_participants)")}
+    story_state_columns = {str(row["name"]) for row in db.fetch_all("pragma table_info(story_states)")}
+    row = db.fetch_one("select mode, scenario_id from sessions where id = ?", ("s1",))
+    migration_ids = {str(row["id"]) for row in db.fetch_all("select id from schema_migrations order by id")}
+
+    assert {"mode", "scenario_id"} <= session_columns
+    assert {"session_id", "role_id", "display_name", "ordinal"} <= participant_columns
+    assert {"session_id", "scenario_id", "state_json", "current_scene"} <= story_state_columns
+    assert "0003_scenario_sessions" in migration_ids
+    assert row is not None
+    assert row["mode"] == "companion"
+    assert row["scenario_id"] is None
+
+
 def test_database_creates_parent_directory(tmp_path: Path) -> None:
     db_path = tmp_path / "nested" / "state" / "nanorole.sqlite3"
     db = Database(db_path)

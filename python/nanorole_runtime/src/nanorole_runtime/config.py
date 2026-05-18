@@ -42,6 +42,7 @@ class PathsConfig:
     logs_dir: Path
     sessions_dir: Path
     roles_dir: Path
+    scenarios_dir: Path
     database_path: Path
 
 
@@ -73,6 +74,7 @@ def load_config(
             "logs_dir": ".nanorole/logs",
             "sessions_dir": ".nanorole/sessions",
             "roles_dir": "examples/roles",
+            "scenarios_dir": "examples/scenarios",
             "database_path": ".nanorole/nanorole.sqlite3",
         },
     }
@@ -123,6 +125,7 @@ def load_config(
             logs_dir=_resolve_path(root, data["paths"].get("logs_dir", ".nanorole/logs")),
             sessions_dir=_resolve_path(root, data["paths"].get("sessions_dir", ".nanorole/sessions")),
             roles_dir=_resolve_path(root, data["paths"].get("roles_dir", "examples/roles")),
+            scenarios_dir=_resolve_path(root, data["paths"].get("scenarios_dir", "examples/scenarios")),
             database_path=_resolve_path(root, data["paths"].get("database_path", ".nanorole/nanorole.sqlite3")),
         ),
         repo_root=root,

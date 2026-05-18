@@ -1,0 +1,25 @@
+id: forgotten-observatory
+name: Forgotten Observatory
+version: 1.0.0
+description: A stalled observatory clock hides a missing archive.
+mode: mystery
+roles:
+  - clockwork-sage
+  - neko-maid
+world: A brass city where public clocks regulate memory archives.
+initial_scene: The observatory clock has stopped...
+initial_state:
+  phase: opening
+  clock: stopped
+public_facts:
+  - id: public-1
+    content: The public clock stopped at midnight.
+hidden_facts:
+  - id: hidden-1
+    content: The clock was stopped from inside the archive room.
+    visibility:
+      - clockwork-sage
+clues:
+  - id: clue-1
+    content: A bent brass key rests under the dial.
+    status: hidden
