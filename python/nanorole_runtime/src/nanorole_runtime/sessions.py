@@ -13,6 +13,7 @@ from .llm import ChatClient
 from .memory import MemoryExtractor, MemoryStore
 from .roles import RolePackage, load_role_by_id
 from .scenarios import ScenarioPackage, load_scenario_by_id
+from .session_store import SessionStore, StoredSession
 from .sessions_types import ChatMessage
 from .storage import Database
 from .summaries import SummaryStore, generate_session_summary, should_update_summary
@@ -20,7 +21,6 @@ from .turns import CompanionTurnPipeline
 
 
 DEFAULT_USER_ID = "local-user"
-VALID_SESSION_STATUS = {"active", "archived", "deleted"}
 
 
 @dataclass
@@ -74,25 +74,23 @@ class SessionManager:
         self.client = client
         self.database = Database(config.paths.database_path)
         self.database.initialize()
+        self.session_store = SessionStore(self.database)
         self._role_cache: dict[str, RolePackage] = {}
         self._sessions: dict[str, SessionState] = {}
 
     def create_session(self, role_id: str, config: AppConfig | None = None) -> SessionState:
         role = self._resolve_role(role_id)
-        now = self._now()
-        session = SessionState(
-            session_id=uuid.uuid4().hex,
+        stored = self.session_store.create_session(
+            user_id=DEFAULT_USER_ID,
+            companion_id=role.id,
             role_id=role.id,
             role_name=role.name,
             role_version=role.version,
-            role_opening=role.opening,
-            config=config or self.config,
             mode="companion",
-            created_at=now,
-            updated_at=now,
-            last_message_at=None,
+            scenario_id=None,
+            scenario_name=None,
         )
-        self._persist_session(session, role, now)
+        session = self._state_from_stored_session(stored, role_opening=role.opening, config=config or self.config)
         self._record(
             session,
             "session_started",
@@ -132,29 +130,28 @@ class SessionManager:
         if not selected_role_ids:
             raise ValueError("scenario session requires at least one role")
         roles = [self._resolve_role(role_id) for role_id in selected_role_ids]
-        now = self._now()
         active_role = roles[0]
-        session = SessionState(
-            session_id=uuid.uuid4().hex,
+        stored = self.session_store.create_session(
+            user_id=DEFAULT_USER_ID,
+            companion_id=active_role.id,
             role_id=active_role.id,
             role_name=active_role.name,
             role_version=active_role.version,
-            role_opening=scenario.initial_scene,
-            config=self.config,
             mode="scenario",
             scenario_id=scenario.id,
             scenario_name=scenario.name,
+        )
+        session = self._state_from_stored_session(
+            stored,
+            role_opening=scenario.initial_scene,
+            config=self.config,
             participants=[
                 {"roleId": role.id, "displayName": role.name, "ordinal": index, "status": "active", "visibility": {}}
                 for index, role in enumerate(roles)
             ],
-            created_at=now,
-            updated_at=now,
-            last_message_at=None,
         )
-        self._persist_session(session, active_role, now)
         self._persist_session_participants(session.session_id, roles)
-        self._persist_story_state(session.session_id, scenario, now)
+        self._persist_story_state(session.session_id, scenario, self._now())
         self._record(
             session,
             "scenario_session_started",
@@ -282,15 +279,7 @@ class SessionManager:
         return event
 
     def list_sessions(self) -> list[SessionState]:
-        rows = self.database.fetch_all(
-            """
-            select *
-            from sessions
-            where status != 'deleted'
-            order by coalesce(last_message_at, created_at) desc, created_at desc
-            """
-        )
-        return [self._state_from_session_row(row, include_history=True) for row in rows]
+        return [self._state_from_stored_session(session) for session in self.session_store.list_sessions()]
 
     def preview_context(self, session_id: str, user_input: str = "") -> dict[str, object]:
         session = self.get_session(session_id)
@@ -622,47 +611,28 @@ class SessionManager:
         title: str | None = None,
         status: str | None = None,
     ) -> SessionState:
-        session = self.get_session(session_id)
-        if status is not None and status not in VALID_SESSION_STATUS:
-            raise ValueError(f"invalid session status: {status}")
-        next_title = session.title
-        if title is not None:
-            next_title = title.strip() or None
-        next_status = status or session.status
-        now = self._now()
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                update sessions
-                set title = ?, status = ?, updated_at = ?
-                where id = ?
-                """,
-                (next_title, next_status, now, session_id),
-            )
-        session.title = next_title
-        session.status = next_status
-        session.updated_at = now
-        if next_status == "deleted":
+        try:
+            current = self.get_session(session_id)
+            next_title = title.strip() or None if title is not None else current.title
+            stored = self.session_store.update_session(session_id, title=next_title, status=status)
+        except KeyError as error:
+            raise SessionNotFoundError(session_id) from error
+        session = self._state_from_stored_session(stored)
+        if stored.status == "deleted":
             self._sessions.pop(session_id, None)
+        else:
+            self._sessions[session_id] = session
         return session
 
     def _record(self, session: SessionState, event_type: str, data: dict[str, Any]) -> None:
         event = RuntimeEvent(event_type, data)
         session.events.append(event)
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                insert into session_events (id, session_id, type, payload_json, created_at)
-                values (?, ?, ?, ?, ?)
-                """,
-                (
-                    uuid.uuid4().hex,
-                    session.session_id,
-                    event_type,
-                    json.dumps(redact_secrets(data), ensure_ascii=False, sort_keys=True),
-                    event.timestamp,
-                ),
-            )
+        self.session_store.record_event(
+            session.session_id,
+            event_type,
+            redact_secrets(data),
+            created_at=event.timestamp,
+        )
 
     def _resolve_role(self, role_id: str) -> RolePackage:
         if role_id in self._role_cache:
@@ -795,53 +765,6 @@ class SessionManager:
                 {"session_id": session.session_id, "role_id": session.role_id, "message": str(summary_error)},
             )
 
-    def _persist_session(self, session: SessionState, role: RolePackage, now: str) -> None:
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                insert into users (id, display_name, created_at, updated_at)
-                values (?, ?, ?, ?)
-                on conflict(id) do update set updated_at = excluded.updated_at
-                """,
-                (DEFAULT_USER_ID, "Local User", now, now),
-            )
-            connection.execute(
-                """
-                insert into companions (id, role_id, role_version, display_name, created_at, updated_at)
-                values (?, ?, ?, ?, ?, ?)
-                on conflict(id) do update set
-                  role_version = excluded.role_version,
-                  display_name = excluded.display_name,
-                  updated_at = excluded.updated_at
-                """,
-                (role.id, role.id, role.version, role.name, now, now),
-            )
-            connection.execute(
-                """
-                insert into sessions (
-                  id, user_id, companion_id, role_id, role_name, role_version, mode, scenario_id, scenario_name,
-                  title, status,
-                  created_at, updated_at, last_message_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session.session_id,
-                    DEFAULT_USER_ID,
-                    role.id,
-                    role.id,
-                    role.name,
-                    role.version,
-                    session.mode,
-                    session.scenario_id,
-                    session.scenario_name,
-                    None,
-                    "active",
-                    now,
-                    now,
-                    None,
-                ),
-            )
-
     def _persist_session_participants(self, session_id: str, roles: list[RolePackage]) -> None:
         with self.database.connect() as connection:
             for index, role in enumerate(roles):
@@ -971,87 +894,59 @@ class SessionManager:
         emotion_label: str | None = None,
         audio_ref: str | None = None,
     ) -> ChatMessage:
-        now = self._now()
-        message_id = uuid.uuid4().hex
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "select coalesce(max(ordinal), -1) + 1 as ordinal from messages where session_id = ?",
-                (session_id,),
-            ).fetchone()
-            ordinal = int(row["ordinal"])
-            connection.execute(
-                """
-                insert into messages (
-                  id, session_id, role, content, created_at, ordinal,
-                  speaker_id, input_modality, output_modality, emotion_label, audio_ref
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message_id,
-                    session_id,
-                    role,
-                    content,
-                    now,
-                    ordinal,
-                    _clean_optional(speaker_id),
-                    _clean_optional(input_modality),
-                    _clean_optional(output_modality),
-                    _clean_optional(emotion_label),
-                    _clean_optional(audio_ref),
-                ),
-            )
-            connection.execute(
-                """
-                update sessions
-                set updated_at = ?, last_message_at = ?
-                where id = ?
-                """,
-                (now, now, session_id),
-            )
-        if session_id in self._sessions:
-            self._sessions[session_id].updated_at = now
-            self._sessions[session_id].last_message_at = now
-        return ChatMessage(
-            role=role,
-            content=content,
-            message_id=message_id,
-            speaker_id=_clean_optional(speaker_id),
-            input_modality=_clean_optional(input_modality),
-            output_modality=_clean_optional(output_modality),
-            emotion_label=_clean_optional(emotion_label),
-            audio_ref=_clean_optional(audio_ref),
+        message = self.session_store.persist_message(
+            session_id,
+            role,
+            content,
+            speaker_id=speaker_id,
+            input_modality=input_modality,
+            output_modality=output_modality,
+            emotion_label=emotion_label,
+            audio_ref=audio_ref,
         )
+        if session_id in self._sessions:
+            stored = self.session_store.get_session(session_id)
+            self._sessions[session_id].updated_at = stored.updated_at
+            self._sessions[session_id].last_message_at = stored.last_message_at
+        return message
 
     def _load_session(self, session_id: str) -> SessionState:
-        row = self.database.fetch_one("select * from sessions where id = ? and status != 'deleted'", (session_id,))
-        if row is None:
-            raise SessionNotFoundError(session_id)
-        return self._state_from_session_row(row, include_history=True)
-
-    def _state_from_session_row(self, row: Any, *, include_history: bool) -> SessionState:
         try:
-            role = self._resolve_role(str(row["role_id"]))
-            opening = role.opening
-        except Exception:
-            opening = ""
-        history = self._load_messages(str(row["id"])) if include_history else []
+            stored = self.session_store.get_session(session_id)
+        except KeyError as error:
+            raise SessionNotFoundError(session_id) from error
+        return self._state_from_stored_session(stored)
+
+    def _state_from_stored_session(
+        self,
+        stored: StoredSession,
+        *,
+        role_opening: str | None = None,
+        config: AppConfig | None = None,
+        participants: list[dict[str, Any]] | None = None,
+    ) -> SessionState:
+        if role_opening is None:
+            try:
+                role_opening = self._resolve_role(stored.role_id).opening
+            except Exception:
+                role_opening = ""
         return SessionState(
-            session_id=str(row["id"]),
-            role_id=str(row["role_id"]),
-            role_name=str(row["role_name"]),
-            role_version=str(row["role_version"]),
-            role_opening=opening,
-            config=self.config,
-            mode=str(row["mode"]),
-            scenario_id=str(row["scenario_id"]) if row["scenario_id"] is not None else None,
-            scenario_name=str(row["scenario_name"]) if row["scenario_name"] is not None else None,
-            participants=self._load_participants(str(row["id"])),
-            title=str(row["title"]) if row["title"] is not None else None,
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-            last_message_at=str(row["last_message_at"]) if row["last_message_at"] is not None else None,
-            status=str(row["status"]),
-            history=history,
+            session_id=stored.session_id,
+            role_id=stored.role_id,
+            role_name=stored.role_name,
+            role_version=stored.role_version,
+            role_opening=role_opening,
+            config=config or self.config,
+            mode=stored.mode,
+            scenario_id=stored.scenario_id,
+            scenario_name=stored.scenario_name,
+            participants=participants if participants is not None else self._load_participants(stored.session_id),
+            title=stored.title,
+            created_at=stored.created_at,
+            updated_at=stored.updated_at,
+            last_message_at=stored.last_message_at,
+            status=stored.status,
+            history=stored.history,
         )
 
     def _load_participants(self, session_id: str) -> list[dict[str, Any]]:
@@ -1076,28 +971,7 @@ class SessionManager:
         ]
 
     def _load_messages(self, session_id: str) -> list[ChatMessage]:
-        rows = self.database.fetch_all(
-            """
-            select id, role, content, speaker_id, input_modality, output_modality, emotion_label, audio_ref
-            from messages
-            where session_id = ?
-            order by ordinal
-            """,
-            (session_id,),
-        )
-        return [
-            ChatMessage(
-                message_id=str(row["id"]),
-                role=str(row["role"]),
-                content=str(row["content"]),
-                speaker_id=str(row["speaker_id"]) if row["speaker_id"] is not None else None,
-                input_modality=str(row["input_modality"]) if row["input_modality"] is not None else None,
-                output_modality=str(row["output_modality"]) if row["output_modality"] is not None else None,
-                emotion_label=str(row["emotion_label"]) if row["emotion_label"] is not None else None,
-                audio_ref=str(row["audio_ref"]) if row["audio_ref"] is not None else None,
-            )
-            for row in rows
-        ]
+        return self.session_store.load_messages(session_id)
 
     def _session_summary_text(self, session_id: str) -> str | None:
         summary = SummaryStore(self.database).get_latest_summary(session_id)
@@ -1105,13 +979,6 @@ class SessionManager:
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
-
-
-def _clean_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    return cleaned or None
 
 
 def _chat_message_response(message: ChatMessage) -> dict[str, str | None]:
