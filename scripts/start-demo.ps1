@@ -60,14 +60,19 @@ function Stop-PortOwners {
 }
 
 function Stop-OldRuntimeProcesses {
-  $runtimeProcesses = Get-CimInstance Win32_Process |
-    Where-Object {
-      $name = [string]$_.Name
-      $commandLine = [string]$_.CommandLine
-      $_.ProcessId -ne $CurrentProcessId -and
-        ($name -eq "uv.exe" -or $name -eq "uvicorn.exe" -or $name -eq "python.exe") -and
-        $commandLine.Contains("nanorole_runtime.server:app")
-    }
+  try {
+    $runtimeProcesses = Get-CimInstance Win32_Process -ErrorAction Stop |
+      Where-Object {
+        $name = [string]$_.Name
+        $commandLine = [string]$_.CommandLine
+        $_.ProcessId -ne $CurrentProcessId -and
+          ($name -eq "uv.exe" -or $name -eq "uvicorn.exe" -or $name -eq "python.exe") -and
+          $commandLine.Contains("nanorole_runtime.server:app")
+      }
+  } catch {
+    Write-Host "Unable to inspect old Nanorole runtime processes; skipping process scan: $($_.Exception.Message)"
+    return
+  }
 
   foreach ($process in $runtimeProcesses) {
     Stop-ProcessById -ProcessId $process.ProcessId

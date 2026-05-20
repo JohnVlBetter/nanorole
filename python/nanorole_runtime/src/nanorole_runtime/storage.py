@@ -127,6 +127,11 @@ SESSION_SCENARIO_COLUMNS = {
     "scenario_name": "scenario_name text",
 }
 
+PARTICIPANT_METADATA_COLUMNS = {
+    "status": "status text not null default 'active'",
+    "visibility_json": "visibility_json text not null default '{}'",
+}
+
 Migration = tuple[str, Callable[[sqlite3.Connection], None]]
 
 
@@ -189,11 +194,19 @@ def _apply_scene_events(connection: sqlite3.Connection) -> None:
     )
 
 
+def _apply_participant_metadata(connection: sqlite3.Connection) -> None:
+    existing_columns = _column_names(connection, "session_participants")
+    for column_name, definition in PARTICIPANT_METADATA_COLUMNS.items():
+        if column_name not in existing_columns:
+            connection.execute(f"alter table session_participants add column {definition}")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     ("0001_initial_schema", _apply_initial_schema),
     ("0002_message_metadata", _apply_message_metadata),
     ("0003_scenario_sessions", _apply_scenario_sessions),
     ("0004_scene_events", _apply_scene_events),
+    ("0005_participant_metadata", _apply_participant_metadata),
 )
 
 

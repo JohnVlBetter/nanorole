@@ -127,6 +127,42 @@ def test_database_creates_scene_events_table(tmp_path: Path) -> None:
     assert "0004_scene_events" in migration_ids
 
 
+def test_database_migrates_legacy_participants_for_metadata(tmp_path: Path) -> None:
+    db_path = tmp_path / "nanorole.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            create table session_participants (
+              session_id text not null,
+              role_id text not null,
+              display_name text not null,
+              ordinal integer not null,
+              primary key (session_id, role_id)
+            );
+
+            insert into session_participants (session_id, role_id, display_name, ordinal)
+            values ('s1', 'clockwork-sage', 'Clockwork Sage', 0);
+            """
+        )
+
+    db = Database(db_path)
+    db.initialize()
+    db.initialize()
+
+    columns = {str(row["name"]) for row in db.fetch_all("pragma table_info(session_participants)")}
+    row = db.fetch_one(
+        "select status, visibility_json from session_participants where session_id = ? and role_id = ?",
+        ("s1", "clockwork-sage"),
+    )
+    migration_ids = {str(row["id"]) for row in db.fetch_all("select id from schema_migrations order by id")}
+
+    assert {"status", "visibility_json"} <= columns
+    assert "0005_participant_metadata" in migration_ids
+    assert row is not None
+    assert row["status"] == "active"
+    assert row["visibility_json"] == "{}"
+
+
 def test_database_creates_parent_directory(tmp_path: Path) -> None:
     db_path = tmp_path / "nested" / "state" / "nanorole.sqlite3"
     db = Database(db_path)

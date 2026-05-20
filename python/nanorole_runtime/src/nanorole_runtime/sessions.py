@@ -145,7 +145,7 @@ class SessionManager:
             scenario_id=scenario.id,
             scenario_name=scenario.name,
             participants=[
-                {"roleId": role.id, "displayName": role.name, "ordinal": index}
+                {"roleId": role.id, "displayName": role.name, "ordinal": index, "status": "active", "visibility": {}}
                 for index, role in enumerate(roles)
             ],
             created_at=now,
@@ -334,6 +334,18 @@ class SessionManager:
         audio_ref: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         session = self.get_session(session_id)
+        if session.mode == "scenario":
+            async for event in self._stream_scenario_message(
+                session=session,
+                message=message,
+                speaker_id=speaker_id,
+                input_modality=input_modality,
+                emotion_label=emotion_label,
+                audio_ref=audio_ref,
+            ):
+                yield event
+            return
+
         role = self._resolve_role(session.role_id)
         pipeline = CompanionTurnPipeline(
             session_id=session.session_id,
@@ -365,6 +377,236 @@ class SessionManager:
             audio_ref=audio_ref,
         ):
             yield StreamEvent(event.type, event.data)
+
+    async def _stream_scenario_message(
+        self,
+        *,
+        session: SessionState,
+        message: str,
+        speaker_id: str | None,
+        input_modality: str | None,
+        emotion_label: str | None,
+        audio_ref: str | None,
+    ) -> AsyncIterator[StreamEvent]:
+        started = datetime.now(timezone.utc)
+        history_before_turn = list(session.history)
+        self._record(
+            session,
+            "turn_started",
+            {
+                "session_id": session.session_id,
+                "mode": "scenario",
+                "speaker_id": speaker_id or "user",
+                "input_modality": input_modality or "text",
+            },
+        )
+        user_message = self._persist_message(
+            session.session_id,
+            "user",
+            message,
+            speaker_id=speaker_id or "user",
+            input_modality=input_modality or "text",
+            emotion_label=emotion_label,
+            audio_ref=audio_ref,
+        )
+        session.history.append(user_message)
+        self._record(
+            session,
+            "user_message",
+            {
+                "session_id": session.session_id,
+                "message_id": user_message.message_id,
+                "speaker_id": user_message.speaker_id,
+                "input_modality": user_message.input_modality,
+                "emotion_label": user_message.emotion_label,
+                "audio_ref": user_message.audio_ref,
+                "content": message,
+            },
+        )
+
+        decisions, director_fallback = await self._direct_scenario_responses(session=session, user_input=message)
+        self._record(
+            session,
+            "director_decision",
+            {"session_id": session.session_id, "responses": decisions, "fallback": director_fallback},
+        )
+        yield StreamEvent("director", {"responses": decisions, "fallback": director_fallback})
+
+        assistant_messages: list[ChatMessage] = []
+        used_memory_ids: list[str] = []
+        try:
+            for decision in decisions:
+                role = self._resolve_role(str(decision["speakerId"]))
+                memory_store = MemoryStore(self.database)
+                assembler = ContextAssembler(memory_store=memory_store)
+                story_context = self._visible_story_context(session.session_id, speaker_id=role.id)
+                session_summary = self._session_summary_text(session.session_id)
+                messages, used_memories = assembler.build_messages(
+                    role=role,
+                    user_id=DEFAULT_USER_ID,
+                    companion_id=role.id,
+                    history=history_before_turn,
+                    user_input=message,
+                    session_summary=session_summary,
+                    story_context=story_context,
+                )
+                goal = str(decision.get("goal") or "").strip()
+                if goal:
+                    messages[0]["content"] += f"\n\nDirector instruction for this response:\n{goal}\n"
+                role_memory_ids = [memory.memory_id for memory in used_memories]
+                used_memory_ids.extend(role_memory_ids)
+                memory_store.mark_used(role_memory_ids)
+                self._record(
+                    session,
+                    "memory_retrieval",
+                    {"session_id": session.session_id, "role_id": role.id, "memory_ids": role_memory_ids},
+                )
+                self._record(
+                    session,
+                    "context_built",
+                    {
+                        "session_id": session.session_id,
+                        "role_id": role.id,
+                        "speaker_id": role.id,
+                        "message_count": len(messages),
+                        "used_memory_ids": role_memory_ids,
+                        "system_prompt_chars": len(messages[0]["content"]) if messages else 0,
+                        "history_messages": max(len(messages) - 2, 0),
+                        "has_session_summary": bool(session_summary and session_summary.strip()),
+                        "used_story": {
+                            "public_fact_count": len(story_context.get("publicFacts", [])),
+                            "revealed_clue_count": len(story_context.get("revealedClues", [])),
+                            "recent_event_count": len(story_context.get("recentEvents", [])),
+                            "visible_hidden_fact_count": len(story_context.get("visibleHiddenFacts", [])),
+                        },
+                    },
+                )
+
+                assistant_parts: list[str] = []
+                async for chunk in self.client.stream_chat(messages=messages, config=session.config, role=role):
+                    assistant_parts.append(chunk)
+                    self._record(
+                        session,
+                        "assistant_delta",
+                        {"session_id": session.session_id, "role_id": role.id, "speaker_id": role.id, "delta": chunk},
+                    )
+                    yield StreamEvent("token", {"delta": chunk, "speakerId": role.id})
+
+                assistant_text = "".join(assistant_parts)
+                assistant_message = self._persist_message(
+                    session.session_id,
+                    "assistant",
+                    assistant_text,
+                    speaker_id=role.id,
+                    output_modality="text",
+                )
+                session.history.append(assistant_message)
+                assistant_messages.append(assistant_message)
+                self._record(
+                    session,
+                    "assistant_message",
+                    {
+                        "session_id": session.session_id,
+                        "role_id": role.id,
+                        "message_id": assistant_message.message_id,
+                        "speaker_id": assistant_message.speaker_id,
+                        "output_modality": assistant_message.output_modality,
+                        "content": assistant_text,
+                    },
+                )
+                yield StreamEvent(
+                    "final",
+                    {
+                        "message": assistant_text,
+                        "speakerId": role.id,
+                        "messages": [_chat_message_response(item) for item in assistant_messages],
+                    },
+                )
+
+            duration_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+            self._record(
+                session,
+                "turn_completed",
+                {
+                    "session_id": session.session_id,
+                    "mode": "scenario",
+                    "input_message_id": user_message.message_id,
+                    "output_message_ids": [item.message_id for item in assistant_messages],
+                    "duration_ms": round(duration_ms, 3),
+                    "used_memory_ids": used_memory_ids,
+                },
+            )
+        except Exception as error:
+            self._record(session, "error", {"session_id": session.session_id, "mode": "scenario", "message": str(error)})
+            yield StreamEvent("error", {"message": str(error)})
+
+    async def _direct_scenario_responses(self, *, session: SessionState, user_input: str) -> tuple[list[dict[str, str]], bool]:
+        active_participants = [
+            participant
+            for participant in session.participants
+            if str(participant.get("status") or "active") == "active"
+        ]
+        fallback = [
+            {
+                "speakerId": str((active_participants[0] if active_participants else {"roleId": session.role_id})["roleId"]),
+                "goal": "Reply to the user while staying within the visible scenario context.",
+            }
+        ]
+        participant_lines = "\n".join(
+            f"- {participant['roleId']}: {participant['displayName']}"
+            for participant in active_participants
+        )
+        try:
+            decision = await self.client.complete_json(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the Nanorole scenario director.\n"
+                            "Choose one or two active participants to reply to the user's latest input.\n"
+                            "Return JSON only: {\"responses\":[{\"speakerId\":\"role-id\",\"goal\":\"short goal\"}]}.\n"
+                            "Do not select more than two participants."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Scenario: {session.scenario_name or session.scenario_id}\n"
+                            f"Active participants:\n{participant_lines}\n\n"
+                            f"User input: {user_input}"
+                        ),
+                    },
+                ],
+                config=session.config,
+            )
+        except Exception as error:
+            self._record(
+                session,
+                "director_failed",
+                {"session_id": session.session_id, "message": str(error), "fallback_speaker_id": fallback[0]["speakerId"]},
+            )
+            return fallback, True
+
+        allowed = {str(participant["roleId"]) for participant in active_participants}
+        responses = decision.get("responses")
+        if not isinstance(responses, list):
+            return fallback, True
+        selected: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in responses:
+            if not isinstance(item, dict):
+                continue
+            speaker_id = str(item.get("speakerId") or "").strip()
+            if speaker_id not in allowed or speaker_id in seen:
+                continue
+            goal = str(item.get("goal") or "").strip() or "Reply to the user."
+            selected.append({"speakerId": speaker_id, "goal": goal})
+            seen.add(speaker_id)
+            if len(selected) == 2:
+                break
+        if not selected:
+            return fallback, True
+        return selected, False
 
     def export_session(self, session_id: str) -> str:
         session = self.get_session(session_id)
@@ -605,10 +847,10 @@ class SessionManager:
             for index, role in enumerate(roles):
                 connection.execute(
                     """
-                    insert into session_participants (session_id, role_id, display_name, ordinal)
-                    values (?, ?, ?, ?)
+                    insert into session_participants (session_id, role_id, display_name, ordinal, status, visibility_json)
+                    values (?, ?, ?, ?, ?, ?)
                     """,
-                    (session_id, role.id, role.name, index),
+                    (session_id, role.id, role.name, index, "active", "{}"),
                 )
 
     def _persist_story_state(self, session_id: str, scenario: ScenarioPackage, now: str) -> None:
@@ -698,15 +940,24 @@ class SessionManager:
         ]
         return list(reversed(events))
 
-    def _visible_story_context(self, session_id: str) -> dict[str, Any]:
+    def _visible_story_context(self, session_id: str, *, speaker_id: str | None = None) -> dict[str, Any]:
         state = self.get_story_state(session_id)
-        return {
+        context = {
             "currentScene": state["currentScene"],
             "currentState": state["currentState"],
             "publicFacts": state["publicFacts"],
             "revealedClues": state["revealedClues"],
             "recentEvents": state["recentEvents"],
         }
+        if speaker_id:
+            context["visibleHiddenFacts"] = [
+                fact
+                for fact in state.get("hiddenFacts", [])
+                if isinstance(fact, dict)
+                and isinstance(fact.get("visibility"), list)
+                and speaker_id in fact["visibility"]
+            ]
+        return context
 
     def _persist_message(
         self,
@@ -806,7 +1057,7 @@ class SessionManager:
     def _load_participants(self, session_id: str) -> list[dict[str, Any]]:
         rows = self.database.fetch_all(
             """
-            select role_id, display_name, ordinal
+            select role_id, display_name, ordinal, status, visibility_json
             from session_participants
             where session_id = ?
             order by ordinal
@@ -818,6 +1069,8 @@ class SessionManager:
                 "roleId": str(row["role_id"]),
                 "displayName": str(row["display_name"]),
                 "ordinal": int(row["ordinal"]),
+                "status": str(row["status"]),
+                "visibility": json.loads(str(row["visibility_json"])),
             }
             for row in rows
         ]
@@ -859,6 +1112,19 @@ def _clean_optional(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _chat_message_response(message: ChatMessage) -> dict[str, str | None]:
+    return {
+        "messageId": message.message_id,
+        "role": message.role,
+        "content": message.content,
+        "speakerId": message.speaker_id,
+        "inputModality": message.input_modality,
+        "outputModality": message.output_modality,
+        "emotionLabel": message.emotion_label,
+        "audioRef": message.audio_ref,
+    }
 
 
 __all__ = [

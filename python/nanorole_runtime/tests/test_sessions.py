@@ -268,6 +268,208 @@ async def test_context_preview_includes_visible_story_state_without_hidden_facts
     assert preview["usedStory"]["recentEvents"][-1]["type"] == "state_changed"
 
 
+async def test_scenario_stream_message_uses_director_for_multiple_role_responses(
+    tmp_path: Path,
+    role: RolePackage,
+) -> None:
+    class MultiRoleClient(ChatClient):
+        def __init__(self) -> None:
+            self.director_calls = 0
+            self.streamed_roles: list[str] = []
+            self.user_message_counts_by_role: dict[str, int] = {}
+
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            self.streamed_roles.append(role.id)
+            self.user_message_counts_by_role[role.id] = len([message for message in messages if message["role"] == "user"])
+            yield f"{role.id} reply"
+
+        async def complete_json(self, *, messages, config):
+            if messages[0]["content"].startswith("You are the Nanorole scenario director."):
+                self.director_calls += 1
+                return {
+                    "responses": [
+                        {"speakerId": "clockwork-sage", "goal": "Explain what changed."},
+                        {"speakerId": "neko-maid", "goal": "Point out the clue."},
+                    ]
+                }
+            return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    client = MultiRoleClient()
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=client)
+    session = manager.create_scenario_session("forgotten-observatory")
+
+    events = [event async for event in manager.stream_message(session.session_id, "What happens next?")]
+    messages = manager.get_session(session.session_id).history
+    assistant_messages = [message for message in messages if message.role == "assistant"]
+
+    assert client.director_calls == 1
+    assert client.streamed_roles == ["clockwork-sage", "neko-maid"]
+    assert client.user_message_counts_by_role == {"clockwork-sage": 1, "neko-maid": 1}
+    assert [message.speaker_id for message in assistant_messages] == ["clockwork-sage", "neko-maid"]
+    assert [message.content for message in assistant_messages] == ["clockwork-sage reply", "neko-maid reply"]
+    assert messages[0].role == "user"
+    assert len([message for message in messages if message.role == "user"]) == 1
+    assert [event.type for event in events] == ["director", "token", "final", "token", "final"]
+    assert events[-1].data["messages"][1]["speakerId"] == "neko-maid"
+
+
+async def test_scenario_director_falls_back_to_primary_role_for_invalid_selection(
+    tmp_path: Path,
+    role: RolePackage,
+) -> None:
+    class InvalidDirectorClient(ChatClient):
+        def __init__(self) -> None:
+            self.streamed_roles: list[str] = []
+
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            self.streamed_roles.append(role.id)
+            yield "fallback reply"
+
+        async def complete_json(self, *, messages, config):
+            if messages[0]["content"].startswith("You are the Nanorole scenario director."):
+                return {"responses": [{"speakerId": "unknown-role", "goal": "This should be ignored."}]}
+            return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    client = InvalidDirectorClient()
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=client)
+    session = manager.create_scenario_session("forgotten-observatory")
+
+    events = [event async for event in manager.stream_message(session.session_id, "Who answers?")]
+
+    assert client.streamed_roles == ["clockwork-sage"]
+    assert events[0].type == "director"
+    assert events[0].data["fallback"] is True
+    assert events[0].data["responses"][0]["speakerId"] == "clockwork-sage"
+    assert events[-1].data["messages"][0]["speakerId"] == "clockwork-sage"
+
+
+async def test_scenario_role_context_only_includes_hidden_facts_visible_to_speaker(
+    tmp_path: Path,
+    role: RolePackage,
+) -> None:
+    class InspectingClient(ChatClient):
+        def __init__(self) -> None:
+            self.system_prompts_by_role: dict[str, str] = {}
+
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            self.system_prompts_by_role[role.id] = messages[0]["content"]
+            yield f"{role.id} saw context"
+
+        async def complete_json(self, *, messages, config):
+            if messages[0]["content"].startswith("You are the Nanorole scenario director."):
+                return {
+                    "responses": [
+                        {"speakerId": "clockwork-sage", "goal": "Use only visible facts."},
+                        {"speakerId": "neko-maid", "goal": "Use only visible facts."},
+                    ]
+                }
+            return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    client = InspectingClient()
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=client)
+    session = manager.create_scenario_session("forgotten-observatory")
+
+    _ = [event async for event in manager.stream_message(session.session_id, "What do you know?")]
+
+    assert "The clock was stopped from inside the archive room." in client.system_prompts_by_role["clockwork-sage"]
+    assert "The clock was stopped from inside the archive room." not in client.system_prompts_by_role["neko-maid"]
+
+
+async def test_scenario_stream_message_records_context_and_memory_usage(
+    tmp_path: Path,
+    role: RolePackage,
+) -> None:
+    class InspectingClient(ChatClient):
+        async def stream_chat(self, *, messages, config, role, on_first_chunk=None, on_first_token=None):
+            yield "archive reply"
+
+        async def complete_json(self, *, messages, config):
+            if messages[0]["content"].startswith("You are the Nanorole scenario director."):
+                return {"responses": [{"speakerId": "clockwork-sage", "goal": "Use relevant memory."}]}
+            return {"memories": [], "archive_memory_ids": [], "relationship_patch": None}
+
+    create_role_file(tmp_path, role)
+    create_role_file(
+        tmp_path,
+        RolePackage(
+            id="neko-maid",
+            name="Neko Maid",
+            version="1.0.0",
+            world="A brass city where public clocks regulate memory archives.",
+            background="A quick observer who keeps the tea room ledger.",
+            persona="Warm, direct, alert.",
+            goals=["Notice small inconsistencies."],
+            opening="Tea is ready.",
+        ),
+    )
+    create_scenario_file(tmp_path)
+    manager = SessionManager(config=load_config(repo_root=tmp_path), client=InspectingClient())
+    session = manager.create_scenario_session("forgotten-observatory")
+    memory = MemoryStore(manager.database).create_memory(
+        user_id="local-user",
+        companion_id="clockwork-sage",
+        memory_type="preference",
+        content="The user wants archive clues explained plainly.",
+        importance=0.8,
+        confidence=0.9,
+        source_message_ids=["seed"],
+    )
+
+    _ = [event async for event in manager.stream_message(session.session_id, "Explain the archive clue.")]
+    refreshed = MemoryStore(manager.database).get_memory(memory.memory_id)
+    exported = manager.export_session(session.session_id)
+
+    assert refreshed.use_count == 1
+    assert '"type": "memory_retrieval"' in exported
+    assert '"type": "context_built"' in exported
+    assert memory.memory_id in exported
+
+
 async def test_sessions_keep_history_and_exports_isolated(tmp_path: Path, role: RolePackage) -> None:
     create_role_file(tmp_path, role)
     config = load_config(repo_root=tmp_path)

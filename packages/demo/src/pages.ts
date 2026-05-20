@@ -25,17 +25,17 @@ export const CHAT_HTML = `<!doctype html>
     button.primary { background: var(--accent); border-color: var(--accent); color: white; }
     button:disabled { opacity: .55; cursor: not-allowed; }
     .app { min-height: 100vh; display: grid; grid-template-columns: 320px minmax(0, 1fr); }
-    aside { display: grid; grid-template-rows: auto auto minmax(130px, .8fr) minmax(150px, 1fr) auto; gap: 12px; padding: 18px; background: var(--panel); border-right: 1px solid var(--border); }
+    aside { display: grid; grid-template-rows: auto auto minmax(110px, .6fr) minmax(110px, .6fr) minmax(150px, 1fr) auto; gap: 12px; padding: 18px; background: var(--panel); border-right: 1px solid var(--border); }
     main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; }
     header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
     h1 { margin: 0; font-size: 18px; line-height: 24px; }
     a { color: var(--accent); text-decoration: none; font-size: 13px; }
     .status, .session, .meta { color: var(--muted); font-size: 12px; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .roles, .sessions { display: grid; align-content: start; gap: 8px; overflow: auto; }
-    .role, .session-card { display: grid; gap: 4px; text-align: left; border: 1px solid var(--border); border-radius: 6px; background: var(--soft); padding: 10px; }
-    .role.active, .session-card.active { border-color: var(--accent); background: var(--accent-soft); }
-    .role strong, .session-card strong { font-size: 13px; }
+    .roles, .scenarios, .sessions { display: grid; align-content: start; gap: 8px; overflow: auto; }
+    .role, .scenario-card, .session-card { display: grid; gap: 4px; text-align: left; border: 1px solid var(--border); border-radius: 6px; background: var(--soft); padding: 10px; }
+    .role.active, .scenario-card.active, .session-card.active { border-color: var(--accent); background: var(--accent-soft); }
+    .role strong, .scenario-card strong, .session-card strong { font-size: 13px; }
     .detail { border: 1px solid var(--border); border-radius: 6px; background: var(--soft); padding: 10px; color: var(--muted); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .messages { display: grid; align-content: start; gap: 12px; overflow: auto; padding: 18px; }
     .message { max-width: min(820px, 88%); border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 10px 12px; }
@@ -56,8 +56,9 @@ export const CHAT_HTML = `<!doctype html>
       <div><h1>Nanorole Chat</h1><div class="status" id="role-status">正在读取角色</div></div>
       <div class="actions"><button class="primary" id="start" disabled>开始会话</button><button id="reset" disabled>重开</button></div>
       <div class="roles" id="roles"></div>
+      <div class="scenarios" id="scenarios"></div>
       <div class="sessions" id="sessions"></div>
-      <div class="detail" id="role-detail">选择一个角色后开始网页对话。</div>
+      <div class="detail" id="story-detail">选择一个角色或场景后开始网页对话。</div>
     </aside>
     <main>
       <header>
@@ -70,9 +71,10 @@ export const CHAT_HTML = `<!doctype html>
   </div>
   <script>
     const rolesEl = document.querySelector("#roles");
+    const scenariosEl = document.querySelector("#scenarios");
     const sessionsEl = document.querySelector("#sessions");
     const roleStatus = document.querySelector("#role-status");
-    const roleDetail = document.querySelector("#role-detail");
+    const storyDetail = document.querySelector("#story-detail");
     const startButton = document.querySelector("#start");
     const resetButton = document.querySelector("#reset");
     const heading = document.querySelector("#heading");
@@ -84,13 +86,24 @@ export const CHAT_HTML = `<!doctype html>
     const memoryLink = document.querySelector("#memory-link");
     const contextLink = document.querySelector("#context-link");
     let roles = [];
+    let scenarios = [];
     let sessions = [];
     let selectedRole = null;
+    let selectedScenario = null;
+    let activeSession = null;
+    let storyState = null;
     let sessionId = null;
     let starting = false;
     let streaming = false;
     function setComposer(enabled) { input.readOnly = !enabled; send.disabled = !enabled; }
     function scroll() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+    function displaySpeaker(speakerId, fallback = "assistant") {
+      if (!speakerId) return fallback;
+      if (speakerId === "user") return "user";
+      const participant = activeSession && Array.isArray(activeSession.participants) ? activeSession.participants.find((item) => item.roleId === speakerId) : null;
+      const role = roles.find((item) => item.id === speakerId);
+      return (participant && participant.displayName) || (role && role.name) || speakerId;
+    }
     function addMessage(role, text, kind = role) {
       const item = document.createElement("article");
       item.className = "message " + kind;
@@ -111,6 +124,9 @@ export const CHAT_HTML = `<!doctype html>
         button.querySelector(".meta").textContent = role.id + " · " + (role.version || "-");
         button.onclick = async () => {
           selectedRole = role;
+          selectedScenario = null;
+          activeSession = null;
+          storyState = null;
           sessionId = null;
           heading.textContent = role.name || role.id;
           sessionLine.textContent = "已选择角色，点击开始会话";
@@ -119,15 +135,49 @@ export const CHAT_HTML = `<!doctype html>
           empty.className = "empty";
           empty.textContent = role.opening || "点击开始会话创建新会话。";
           messagesEl.append(empty);
-          roleDetail.textContent = ((role.persona || "") + "\\n\\n" + (role.opening || "")).trim();
+          storyDetail.textContent = ((role.persona || "") + "\\n\\n" + (role.opening || "")).trim();
           startButton.disabled = false;
           resetButton.disabled = true;
           setComposer(false);
           renderRoles();
+          renderScenarios();
           renderSessions();
           updateMemoryLink();
         };
         rolesEl.append(button);
+      }
+    }
+    function renderScenarios() {
+      scenariosEl.replaceChildren();
+      for (const scenario of scenarios) {
+        const button = document.createElement("button");
+        button.className = "scenario-card" + (selectedScenario && selectedScenario.scenarioId === scenario.scenarioId ? " active" : "");
+        button.innerHTML = "<strong></strong><span class='meta'></span>";
+        button.querySelector("strong").textContent = scenario.name || scenario.scenarioId;
+        button.querySelector(".meta").textContent = (scenario.mode || "scenario") + " · " + ((scenario.roleIds || []).length || 0) + " 个角色";
+        button.onclick = () => {
+          selectedScenario = scenario;
+          selectedRole = null;
+          activeSession = null;
+          storyState = null;
+          sessionId = null;
+          heading.textContent = scenario.name || scenario.scenarioId;
+          sessionLine.textContent = "已选择场景，点击开始会话";
+          messagesEl.replaceChildren();
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = scenario.description || "点击开始会话创建场景会话。";
+          messagesEl.append(empty);
+          storyDetail.textContent = ((scenario.description || "") + "\\n\\n角色：" + ((scenario.roleIds || []).join(", ") || "-")).trim();
+          startButton.disabled = false;
+          resetButton.disabled = true;
+          setComposer(false);
+          renderRoles();
+          renderScenarios();
+          renderSessions();
+          updateMemoryLink();
+        };
+        scenariosEl.append(button);
       }
     }
     function renderSessions() {
@@ -136,11 +186,29 @@ export const CHAT_HTML = `<!doctype html>
         const button = document.createElement("button");
         button.className = "session-card" + (sessionId === item.sessionId ? " active" : "");
         button.innerHTML = "<strong></strong><span class='meta'></span>";
-        button.querySelector("strong").textContent = item.roleName || item.roleId || "Session";
-        button.querySelector(".meta").textContent = (item.lastMessageAt || item.createdAt || "").replace("T", " ").slice(0, 19) + " " + item.sessionId.slice(0, 8);
+        button.querySelector("strong").textContent = item.scenarioName || item.roleName || item.roleId || "Session";
+        button.querySelector(".meta").textContent = (item.mode || "companion") + " · " + (item.lastMessageAt || item.createdAt || "").replace("T", " ").slice(0, 19) + " " + item.sessionId.slice(0, 8);
         button.onclick = () => resumeSession(item.sessionId);
         sessionsEl.append(button);
       }
+    }
+    function renderStoryDetail() {
+      if (activeSession && activeSession.mode === "scenario") {
+        const participants = Array.isArray(activeSession.participants) ? activeSession.participants : [];
+        const participantText = participants.map((item) => (item.displayName || item.roleId) + " (" + (item.status || "active") + ")").join("\\n") || "-";
+        const stateText = storyState ? ("\\n\\n场景：" + (storyState.currentScene || "-") + "\\n阶段：" + ((storyState.currentState && storyState.currentState.phase) || "-")) : "";
+        storyDetail.textContent = "参与角色：\\n" + participantText + stateText;
+        return;
+      }
+      if (selectedScenario) {
+        storyDetail.textContent = ((selectedScenario.description || "") + "\\n\\n角色：" + ((selectedScenario.roleIds || []).join(", ") || "-")).trim();
+        return;
+      }
+      if (selectedRole) {
+        storyDetail.textContent = ((selectedRole.persona || "") + "\\n\\n" + (selectedRole.opening || "")).trim();
+        return;
+      }
+      storyDetail.textContent = "选择一个角色或场景后开始网页对话。";
     }
     async function loadSessions() {
       try {
@@ -156,23 +224,48 @@ export const CHAT_HTML = `<!doctype html>
     async function resumeSession(nextSessionId) {
       const summary = sessions.find((item) => item.sessionId === nextSessionId);
       sessionId = nextSessionId;
-      if (summary) selectedRole = roles.find((role) => role.id === summary.roleId) || selectedRole;
-      heading.textContent = (summary && summary.roleName) || (selectedRole && selectedRole.name) || "Session";
+      activeSession = summary || null;
+      storyState = null;
+      if (summary && summary.mode === "scenario") {
+        selectedScenario = scenarios.find((scenario) => scenario.scenarioId === summary.scenarioId) || selectedScenario;
+        selectedRole = null;
+      } else if (summary) {
+        selectedRole = roles.find((role) => role.id === summary.roleId) || selectedRole;
+        selectedScenario = null;
+      }
+      heading.textContent = (summary && (summary.scenarioName || summary.roleName)) || (selectedRole && selectedRole.name) || "Session";
       sessionLine.textContent = "session " + sessionId;
       messagesEl.replaceChildren();
       try {
         const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/messages", { cache: "no-store" });
         const data = await response.json();
-        for (const message of Array.isArray(data.messages) ? data.messages : []) addMessage(message.role, message.content, message.role);
+        for (const message of Array.isArray(data.messages) ? data.messages : []) addMessage(displaySpeaker(message.speakerId, message.role), message.content, message.role);
       } catch (error) {
         addMessage("error", String(error), "error");
       }
+      await loadStoryState();
       resetButton.disabled = false;
       setComposer(true);
       renderRoles();
+      renderScenarios();
       renderSessions();
+      renderStoryDetail();
       updateMemoryLink();
       input.focus();
+    }
+    async function loadStoryState() {
+      if (!sessionId || !activeSession || activeSession.mode !== "scenario") {
+        storyState = null;
+        renderStoryDetail();
+        return;
+      }
+      try {
+        const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/story-state", { cache: "no-store" });
+        storyState = response.ok ? await response.json() : null;
+      } catch {
+        storyState = null;
+      }
+      renderStoryDetail();
     }
     function updateMemoryLink() {
       const params = new URLSearchParams({ userId: "local-user" });
@@ -188,21 +281,36 @@ export const CHAT_HTML = `<!doctype html>
         roles = Array.isArray(data.roles) ? data.roles : [];
         selectedRole = roles[0] || null;
         roleStatus.textContent = roles.length + " 个角色";
-        if (selectedRole) roleDetail.textContent = ((selectedRole.persona || "") + "\\n\\n" + (selectedRole.opening || "")).trim();
+        renderStoryDetail();
         startButton.disabled = !selectedRole;
         renderRoles();
         updateMemoryLink();
+        await loadScenarios();
         await loadSessions();
         setComposer(false);
       } catch (error) {
         roleStatus.textContent = "角色读取失败";
-        roleDetail.textContent = String(error);
+        storyDetail.textContent = String(error);
+      }
+    }
+    async function loadScenarios() {
+      try {
+        const response = await fetch("/api/scenarios", { cache: "no-store" });
+        const data = await response.json();
+        scenarios = Array.isArray(data.scenarios) ? data.scenarios : [];
+        renderScenarios();
+      } catch {
+        scenarios = [];
+        renderScenarios();
       }
     }
     async function startSession() {
+      if (selectedScenario) return startScenarioSession();
       if (!selectedRole || starting || streaming) return;
       starting = true;
       sessionId = null;
+      activeSession = null;
+      storyState = null;
       startButton.disabled = true;
       resetButton.disabled = true;
       setComposer(false);
@@ -211,6 +319,7 @@ export const CHAT_HTML = `<!doctype html>
         if (!response.ok) { addMessage("error", await response.text(), "error"); return; }
         const data = await response.json();
         sessionId = data.sessionId;
+        activeSession = data;
         heading.textContent = data.roleName || selectedRole.name || selectedRole.id;
         sessionLine.textContent = "session " + sessionId;
         messagesEl.replaceChildren();
@@ -219,12 +328,47 @@ export const CHAT_HTML = `<!doctype html>
         setComposer(true);
         updateMemoryLink();
         await loadSessions();
+        renderStoryDetail();
         input.focus();
       } catch (error) {
         addMessage("error", String(error), "error");
       } finally {
         starting = false;
         startButton.disabled = !selectedRole;
+        resetButton.disabled = !sessionId;
+        if (!sessionId) setComposer(false);
+      }
+    }
+    async function startScenarioSession() {
+      if (!selectedScenario || starting || streaming) return;
+      starting = true;
+      sessionId = null;
+      activeSession = null;
+      storyState = null;
+      startButton.disabled = true;
+      resetButton.disabled = true;
+      setComposer(false);
+      try {
+        const response = await fetch("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "scenario", scenarioId: selectedScenario.scenarioId }) });
+        if (!response.ok) { addMessage("error", await response.text(), "error"); return; }
+        const data = await response.json();
+        sessionId = data.sessionId;
+        activeSession = data;
+        heading.textContent = data.scenarioName || selectedScenario.name || selectedScenario.scenarioId;
+        sessionLine.textContent = "scenario session " + sessionId;
+        messagesEl.replaceChildren();
+        addMessage("scene", data.opening || selectedScenario.description || "场景会话已开始", "assistant");
+        resetButton.disabled = false;
+        setComposer(true);
+        updateMemoryLink();
+        await loadStoryState();
+        await loadSessions();
+        input.focus();
+      } catch (error) {
+        addMessage("error", String(error), "error");
+      } finally {
+        starting = false;
+        startButton.disabled = !selectedScenario;
         resetButton.disabled = !sessionId;
         if (!sessionId) setComposer(false);
       }
@@ -249,7 +393,8 @@ export const CHAT_HTML = `<!doctype html>
       streaming = true;
       setComposer(false);
       addMessage("user", text, "user");
-      const assistant = addMessage("assistant", "", "assistant");
+      let assistant = null;
+      let assistantSpeaker = "";
       let buffer = "";
       try {
         const response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + "/messages:stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: text }) });
@@ -262,19 +407,35 @@ export const CHAT_HTML = `<!doctype html>
           const parsed = parseSse(buffer + decoder.decode(read.value, { stream: true }));
           buffer = parsed.rest;
           for (const item of parsed.events) {
-            if (item.event === "token") assistant.textContent += item.data.delta || "";
-            if (item.event === "final") assistant.textContent = item.data.message || assistant.textContent;
+            if (item.event === "director" && item.data.fallback) sessionLine.textContent = "scenario session " + sessionId + " · director fallback";
+            if (item.event === "token") {
+              const speaker = item.data.speakerId || "assistant";
+              if (!assistant || assistantSpeaker !== speaker) {
+                assistantSpeaker = speaker;
+                assistant = addMessage(displaySpeaker(speaker), "", "assistant");
+              }
+              assistant.textContent += item.data.delta || "";
+            }
+            if (item.event === "final") {
+              const speaker = item.data.speakerId || assistantSpeaker || "assistant";
+              if (!assistant || assistantSpeaker !== speaker) {
+                assistantSpeaker = speaker;
+                assistant = addMessage(displaySpeaker(speaker), "", "assistant");
+              }
+              assistant.textContent = item.data.message || assistant.textContent;
+            }
             if (item.event === "error") throw new Error(item.data.message || "runtime error");
           }
           scroll();
         }
       } catch (error) {
-        assistant.parentElement.remove();
+        if (assistant) assistant.parentElement.remove();
         addMessage("error", String(error), "error");
       } finally {
         streaming = false;
         setComposer(Boolean(sessionId));
         loadSessions();
+        loadStoryState();
         input.focus();
       }
     }

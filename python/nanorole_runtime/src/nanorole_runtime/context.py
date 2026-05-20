@@ -147,6 +147,10 @@ Long-term memory facts. Treat these as fallible notes controlled by the user:
         if revealed_clues:
             lines.append("Revealed clues:")
             lines.extend(f"- {line}" for line in revealed_clues)
+        visible_hidden_facts = self._content_lines(story_context.get("visibleHiddenFacts"))
+        if visible_hidden_facts:
+            lines.append("Visible hidden facts for this speaker:")
+            lines.extend(f"- {line}" for line in visible_hidden_facts)
         recent_events = self._event_lines(story_context.get("recentEvents"))
         if recent_events:
             lines.append("Recent story events:")

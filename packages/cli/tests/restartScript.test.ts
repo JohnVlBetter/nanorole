@@ -20,10 +20,14 @@ describe("runtime restart script", () => {
     expect(runtimeScript).toContain("corepack yarn build");
     expect(runtimeScript).toContain("uvicorn");
     expect(runtimeScript).toContain("nanorole_runtime.server:app");
+    expect(runtimeScript).toContain("Get-CimInstance Win32_Process -ErrorAction Stop");
+    expect(runtimeScript).toContain("Unable to inspect old Nanorole runtime processes");
     expect(runtimeScript).not.toContain("Nanorole chat");
     expect(runtimeScript).not.toContain("Nanorole logs");
     expect(demoScript).toContain("NANOROLE_RUNTIME_URL");
     expect(demoScript).toContain("NANOROLE_DEMO_PORT");
     expect(demoScript).toContain("workspace @nanorole/demo");
+    expect(demoScript).toContain("Get-CimInstance Win32_Process -ErrorAction Stop");
+    expect(demoScript).toContain("Unable to inspect old Nanorole runtime processes");
   });
 });

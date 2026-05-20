@@ -93,6 +93,22 @@ describe("demo server", () => {
     expect(logs).not.toContain("鏃");
   });
 
+  test("chat page exposes scenario and multi-role workbench controls", async () => {
+    const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
+    const baseUrl = await listen(demo);
+
+    const html = await fetch(`${baseUrl}/chat`).then((response) => response.text());
+
+    expect(html).toContain('id="scenarios"');
+    expect(html).toContain('id="story-detail"');
+    expect(html).toContain("async function loadScenarios");
+    expect(html).toContain("async function loadStoryState");
+    expect(html).toContain("startScenarioSession");
+    expect(html).toContain("function displaySpeaker");
+    expect(html).toContain("item.data.speakerId");
+    expect(html).toContain("/story-state");
+  });
+
   test("proxies session creation and message streams to Python core", async () => {
     const runtime = createServer(async (request: IncomingMessage, response: ServerResponse) => {
       if (request.url === "/v1/sessions" && request.method === "POST") {
