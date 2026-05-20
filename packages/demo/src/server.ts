@@ -2,7 +2,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path";
 
 import { readRuntimeLogs } from "./logs.js";
-import { CHAT_HTML, LOGS_HTML, MEMORIES_HTML } from "./pages.js";
+import { CHAT_HTML } from "./pages/chatPage.js";
+import { LOGS_HTML } from "./pages/logsPage.js";
+import { MEMORIES_HTML } from "./pages/memoriesPage.js";
 import { discoverRoles } from "./roles.js";
 
 export interface DemoServerOptions {

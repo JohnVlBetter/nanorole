@@ -130,6 +130,12 @@ def test_fastapi_routes_create_session_stream_and_export(tmp_path: Path) -> None
     assert '"message": "first second"' in streamed.text
     assert preview.status_code == 200
     assert preview.json()["sessionId"] == session_id
+    assert preview.json()["mode"] == "companion"
+    assert preview.json()["systemPrompt"]
+    assert preview.json()["context"]["world"] == "A city of brass towers."
+    assert "selectedMemories" in preview.json()["context"]
+    assert "sessionSummary" in preview.json()["context"]
+    assert "story" in preview.json()["context"]
     assert preview.json()["messages"][-1] == {"role": "user", "content": "Next"}
     assert messages.json()["messages"][0] == {
         "messageId": messages.json()["messages"][0]["messageId"],

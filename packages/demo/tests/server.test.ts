@@ -53,7 +53,7 @@ describe("demo server", () => {
     const server = createDemoServer({ projectRoot: root, runtimeUrl: "http://127.0.0.1:9" });
     const baseUrl = await listen(server);
 
-    await expect(fetch(`${baseUrl}/chat`).then((response) => response.text())).resolves.toContain("Nanorole Chat");
+    await expect(fetch(`${baseUrl}/chat`).then((response) => response.text())).resolves.toContain("Nanorole Studio");
     await expect(fetch(`${baseUrl}/logs`).then((response) => response.text())).resolves.toContain("Nanorole Logs");
     await expect(fetch(`${baseUrl}/memories`).then((response) => response.text())).resolves.toContain("Nanorole Memories");
     await expect(fetch(`${baseUrl}/api/roles`).then((response) => response.json())).resolves.toMatchObject({
@@ -93,16 +93,26 @@ describe("demo server", () => {
     expect(logs).not.toContain("鏃");
   });
 
-  test("chat page exposes scenario and multi-role workbench controls", async () => {
+  test("chat page presents single-role studio as the default workbench", async () => {
     const demo = createDemoServer({ projectRoot: process.cwd(), runtimeUrl: "http://127.0.0.1:9" });
     const baseUrl = await listen(demo);
 
     const html = await fetch(`${baseUrl}/chat`).then((response) => response.text());
 
     expect(html).toContain('id="scenarios"');
-    expect(html).toContain('id="story-detail"');
+    expect(html).toContain("Nanorole Studio");
+    expect(html).toContain("Relationship");
+    expect(html).toContain("World");
+    expect(html).toContain("Memory");
+    expect(html).toContain("Context");
+    expect(html).not.toContain("multi-role");
     expect(html).toContain("async function loadScenarios");
     expect(html).toContain("async function loadStoryState");
+    expect(html).toContain("async function loadContextPreview");
+    expect(html).toContain('id="relationship-detail"');
+    expect(html).toContain('id="world-detail"');
+    expect(html).toContain('id="memory-detail"');
+    expect(html).toContain('id="context-detail"');
     expect(html).toContain("startScenarioSession");
     expect(html).toContain("function displaySpeaker");
     expect(html).toContain("item.data.speakerId");
