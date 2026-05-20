@@ -174,6 +174,15 @@ class SessionManager:
         )
         return session
 
+    def create_story_session(self, *, role_id: str, scenario_id: str | None = None) -> SessionState:
+        if scenario_id:
+            session = self.create_scenario_session(scenario_id, role_ids=[role_id])
+            session.mode = "story"
+            self.database.execute("update sessions set mode = ? where id = ?", ("story", session.session_id))
+            self._sessions[session.session_id] = session
+            return session
+        return self.create_session(role_id)
+
     def get_session(self, session_id: str) -> SessionState:
         if session_id in self._sessions:
             return self._sessions[session_id]
@@ -214,7 +223,7 @@ class SessionManager:
         role = self._resolve_role(session.role_id)
         memory_store = MemoryStore(self.database)
         assembler = ContextAssembler(memory_store=memory_store)
-        story_context = self._visible_story_context(session.session_id) if session.mode == "scenario" else None
+        story_context = self._visible_story_context(session.session_id) if session.mode in {"scenario", "story"} else None
         package = assembler.build_context_package(
             session_id=session.session_id,
             mode="story" if story_context else session.mode,
@@ -284,7 +293,7 @@ class SessionManager:
             user_id=DEFAULT_USER_ID,
             companion_id=role.id,
             session_summary=self._session_summary_text(session.session_id),
-            story_context=self._visible_story_context(session.session_id) if session.mode == "scenario" else None,
+            story_context=self._visible_story_context(session.session_id) if session.mode in {"scenario", "story"} else None,
             memory_store=MemoryStore(self.database),
             persist_message=lambda message_role, content, **metadata: self._persist_message(
                 session.session_id,

@@ -178,6 +178,36 @@ def test_fastapi_scenario_routes_and_create_session(tmp_path: Path) -> None:
     assert story_state.json()["initialState"]["phase"] == "opening"
 
 
+def test_fastapi_accepts_single_role_camel_case_create_request(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+
+    created = client.post("/v1/sessions", json={"mode": "companion", "roleId": "clockwork-sage"})
+
+    assert created.status_code == 200
+    assert created.json()["mode"] == "companion"
+    assert created.json()["roleId"] == "clockwork-sage"
+
+
+def test_fastapi_accepts_single_role_story_alias_without_multi_role_participants(tmp_path: Path) -> None:
+    write_role(tmp_path)
+    write_neko_role(tmp_path)
+    write_scenario(tmp_path)
+    app = create_app(config=load_config(repo_root=tmp_path), client=StubClient())
+    client = TestClient(app)
+
+    created = client.post(
+        "/v1/sessions",
+        json={"mode": "story", "roleId": "clockwork-sage", "scenarioId": "forgotten-observatory"},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["mode"] == "story"
+    assert created.json()["roleId"] == "clockwork-sage"
+    assert len(created.json()["participants"]) <= 1
+
+
 def test_fastapi_appends_story_events_and_updates_story_state(tmp_path: Path) -> None:
     write_role(tmp_path)
     write_neko_role(tmp_path)

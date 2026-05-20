@@ -17,6 +17,7 @@ from .sessions import DEFAULT_USER_ID, SessionManager, SessionNotFoundError
 
 class CreateSessionRequest(BaseModel):
     role_id: str | None = None
+    roleId: str | None = None
     mode: str = "companion"
     scenarioId: str | None = None
     roleIds: list[str] | None = None
@@ -87,19 +88,24 @@ def create_app(config: AppConfig, client: ChatClient | None = None) -> FastAPI:
 
     @app.post("/v1/sessions")
     def create_session(request: CreateSessionRequest) -> dict[str, object]:
+        requested_role_id = request.role_id or request.roleId
         try:
             if request.mode == "scenario":
                 if not request.scenarioId:
                     raise ValueError("scenarioId is required for scenario sessions")
                 session = manager.create_scenario_session(request.scenarioId, role_ids=request.roleIds)
             elif request.mode == "companion":
-                if not request.role_id:
-                    raise ValueError("role_id is required for companion sessions")
-                session = manager.create_session(request.role_id)
+                if not requested_role_id:
+                    raise ValueError("roleId is required for companion sessions")
+                session = manager.create_session(requested_role_id)
+            elif request.mode == "story":
+                if not requested_role_id:
+                    raise ValueError("roleId is required for story sessions")
+                session = manager.create_story_session(role_id=requested_role_id, scenario_id=request.scenarioId)
             else:
                 raise ValueError(f"invalid session mode: {request.mode}")
         except RoleNotFoundError as error:
-            missing_role = request.role_id or str(error)
+            missing_role = requested_role_id or str(error)
             raise HTTPException(status_code=404, detail=f"role not found: {missing_role}") from error
         except ScenarioNotFoundError as error:
             raise HTTPException(status_code=404, detail=f"scenario not found: {request.scenarioId}") from error
