@@ -239,3 +239,50 @@ def test_context_includes_visible_story_state_without_hidden_facts(tmp_path: Pat
     assert "A bent brass key rests under the dial." in system
     assert "The archive door opened after the dial was inspected." in system
     assert "The clock was stopped from inside the archive room." not in system
+
+
+def test_context_package_exposes_structured_inputs(tmp_path: Path) -> None:
+    database = Database(tmp_path / "nanorole.sqlite3")
+    database.initialize()
+    store = MemoryStore(database)
+    memory = store.create_memory(
+        user_id="local-user",
+        companion_id="companion",
+        memory_type="preference",
+        content="The user prefers concise explanations.",
+        importance=0.8,
+        confidence=0.9,
+        source_message_ids=["m1"],
+    )
+    store.upsert_relationship_state(
+        user_id="local-user",
+        companion_id="companion",
+        summary="The user trusts concise technical guidance.",
+        familiarity=0.4,
+        trust=0.5,
+        preferred_address="",
+        communication_style="concise",
+    )
+
+    assembler = ContextAssembler(memory_store=store)
+    package = assembler.build_context_package(
+        session_id="s1",
+        mode="companion",
+        role=role(),
+        user_id="local-user",
+        companion_id="companion",
+        history=[ChatMessage(role="user", content="Keep this short.")],
+        user_input="Explain the plan concisely.",
+        session_summary="The user is planning Nanorole.",
+        story_context=None,
+    )
+
+    assert package.session_id == "s1"
+    assert package.mode == "companion"
+    assert package.world_context == "A quiet room."
+    assert package.relationship is not None
+    assert package.relationship.communication_style == "concise"
+    assert [item.memory_id for item in package.selected_memories] == [memory.memory_id]
+    assert package.session_summary == "The user is planning Nanorole."
+    assert package.story is None
+    assert package.model_messages[-1] == {"role": "user", "content": "Explain the plan concisely."}

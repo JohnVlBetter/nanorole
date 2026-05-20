@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator
 from .config import AppConfig, redact_secrets
 from .context import ContextAssembler
 from .llm import ChatClient
-from .memory import MemoryExtractor, MemoryStore
+from .memory import MemoryExtractor, MemoryRecord, MemoryStore, RelationshipState
 from .roles import RolePackage, load_role_by_id
 from .scenarios import load_scenario_by_id
 from .session_store import SessionStore, StoredSession
@@ -214,19 +214,30 @@ class SessionManager:
         role = self._resolve_role(session.role_id)
         memory_store = MemoryStore(self.database)
         assembler = ContextAssembler(memory_store=memory_store)
-        messages, used_memories = assembler.build_messages(
+        story_context = self._visible_story_context(session.session_id) if session.mode == "scenario" else None
+        package = assembler.build_context_package(
+            session_id=session.session_id,
+            mode="story" if story_context else session.mode,
             role=role,
             user_id=DEFAULT_USER_ID,
             companion_id=role.id,
             history=session.history,
             user_input=user_input,
             session_summary=self._session_summary_text(session.session_id),
-            story_context=self._visible_story_context(session.session_id) if session.mode == "scenario" else None,
+            story_context=story_context,
         )
-        used_story = self._visible_story_context(session.session_id) if session.mode == "scenario" else None
         return {
             "sessionId": session.session_id,
-            "messages": messages,
+            "mode": session.mode,
+            "messages": package.model_messages,
+            "systemPrompt": package.model_messages[0]["content"],
+            "context": {
+                "world": package.world_context,
+                "relationship": _relationship_response(package.relationship),
+                "selectedMemories": [_memory_context_response(memory) for memory in package.selected_memories],
+                "sessionSummary": package.session_summary,
+                "story": package.story,
+            },
             "usedMemories": [
                 {
                     "memoryId": memory.memory_id,
@@ -235,9 +246,9 @@ class SessionManager:
                     "importance": memory.importance,
                     "confidence": memory.confidence,
                 }
-                for memory in used_memories
+                for memory in package.selected_memories
             ],
-            "usedStory": used_story,
+            "usedStory": package.story,
         }
 
     async def stream_message(
@@ -819,6 +830,33 @@ def _chat_message_response(message: ChatMessage) -> dict[str, str | None]:
         "outputModality": message.output_modality,
         "emotionLabel": message.emotion_label,
         "audioRef": message.audio_ref,
+    }
+
+
+def _relationship_response(relationship: RelationshipState | None) -> dict[str, object] | None:
+    if relationship is None:
+        return None
+    return {
+        "userId": relationship.user_id,
+        "companionId": relationship.companion_id,
+        "summary": relationship.summary,
+        "familiarity": relationship.familiarity,
+        "trust": relationship.trust,
+        "preferredAddress": relationship.preferred_address,
+        "communicationStyle": relationship.communication_style,
+        "updatedAt": relationship.updated_at,
+    }
+
+
+def _memory_context_response(memory: MemoryRecord) -> dict[str, object]:
+    return {
+        "memoryId": memory.memory_id,
+        "type": memory.type,
+        "content": memory.content,
+        "importance": memory.importance,
+        "confidence": memory.confidence,
+        "lastUsedAt": memory.last_used_at,
+        "useCount": memory.use_count,
     }
 
 

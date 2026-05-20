@@ -110,7 +110,9 @@ class CompanionTurnPipeline:
         first_token_latency_ms: float | None = None
         try:
             assembler = ContextAssembler(memory_store=self.memory_store)
-            messages, used_memories = assembler.build_messages(
+            context_package = assembler.build_context_package(
+                session_id=self.session_id,
+                mode="story" if self.story_context else "companion",
                 role=self.role,
                 user_id=self.user_id,
                 companion_id=self.companion_id,
@@ -119,6 +121,8 @@ class CompanionTurnPipeline:
                 session_summary=self.session_summary,
                 story_context=self.story_context,
             )
+            messages = context_package.model_messages
+            used_memories = context_package.selected_memories
             used_memory_ids = [memory.memory_id for memory in used_memories]
             self.memory_store.mark_used(used_memory_ids)
             self.record_event(
@@ -135,6 +139,13 @@ class CompanionTurnPipeline:
                     "system_prompt_chars": len(messages[0]["content"]) if messages else 0,
                     "history_messages": max(len(messages) - 2, 0),
                     "has_session_summary": bool(self.session_summary and self.session_summary.strip()),
+                    "context": {
+                        "world_chars": len(context_package.world_context),
+                        "memory_count": len(context_package.selected_memories),
+                        "has_relationship": context_package.relationship is not None,
+                        "has_session_summary": bool(context_package.session_summary),
+                        "has_story": context_package.story is not None,
+                    },
                 },
             )
             if self.config.logging.trace_requests:
@@ -219,6 +230,11 @@ class CompanionTurnPipeline:
                     "context": {
                         "used_memory_ids": used_memory_ids,
                         "message_count": len(messages),
+                        "world_chars": len(context_package.world_context),
+                        "memory_count": len(context_package.selected_memories),
+                        "has_relationship": context_package.relationship is not None,
+                        "has_session_summary": bool(context_package.session_summary),
+                        "has_story": context_package.story is not None,
                     },
                     "error": None,
                 },

@@ -14,13 +14,29 @@ class ContextResult:
     used_memories: list[MemoryRecord]
 
 
+@dataclass(frozen=True)
+class ContextPackage:
+    session_id: str
+    mode: str
+    role: RolePackage
+    world_context: str
+    relationship: RelationshipState | None
+    selected_memories: list[MemoryRecord]
+    session_summary: str | None
+    recent_messages: list[ChatMessage]
+    story: dict[str, Any] | None
+    model_messages: list[dict[str, str]]
+
+
 class ContextAssembler:
     def __init__(self, *, memory_store: MemoryStore) -> None:
         self.memory_store = memory_store
 
-    def build_messages(
+    def build_context_package(
         self,
         *,
+        session_id: str,
+        mode: str,
         role: RolePackage,
         user_id: str,
         companion_id: str,
@@ -28,7 +44,7 @@ class ContextAssembler:
         user_input: str,
         session_summary: str | None = None,
         story_context: dict[str, Any] | None = None,
-    ) -> tuple[list[dict[str, str]], list[MemoryRecord]]:
+    ) -> ContextPackage:
         memories = self._retrieve_memories(
             user_id=user_id,
             companion_id=companion_id,
@@ -45,7 +61,42 @@ class ContextAssembler:
         messages = [{"role": "system", "content": system}]
         messages.extend({"role": item.role, "content": item.content} for item in history[-20:])
         messages.append({"role": "user", "content": user_input})
-        return messages, memories
+        return ContextPackage(
+            session_id=session_id,
+            mode=mode,
+            role=role,
+            world_context=role.world,
+            relationship=relationship,
+            selected_memories=memories,
+            session_summary=session_summary,
+            recent_messages=history[-20:],
+            story=story_context,
+            model_messages=messages,
+        )
+
+    def build_messages(
+        self,
+        *,
+        role: RolePackage,
+        user_id: str,
+        companion_id: str,
+        history: list[ChatMessage],
+        user_input: str,
+        session_summary: str | None = None,
+        story_context: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, str]], list[MemoryRecord]]:
+        package = self.build_context_package(
+            session_id="",
+            mode="companion" if story_context is None else "story",
+            role=role,
+            user_id=user_id,
+            companion_id=companion_id,
+            history=history,
+            user_input=user_input,
+            session_summary=session_summary,
+            story_context=story_context,
+        )
+        return package.model_messages, package.selected_memories
 
     def _retrieve_memories(self, *, user_id: str, companion_id: str, query: str) -> list[MemoryRecord]:
         memories = self.memory_store.list_memories(user_id=user_id, companion_id=companion_id)
