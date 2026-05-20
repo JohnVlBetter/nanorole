@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
@@ -12,10 +11,11 @@ from .context import ContextAssembler
 from .llm import ChatClient
 from .memory import MemoryExtractor, MemoryStore
 from .roles import RolePackage, load_role_by_id
-from .scenarios import ScenarioPackage, load_scenario_by_id
+from .scenarios import load_scenario_by_id
 from .session_store import SessionStore, StoredSession
 from .sessions_types import ChatMessage
 from .storage import Database
+from .story import StoryService
 from .summaries import SummaryStore, generate_session_summary, should_update_summary
 from .turns import CompanionTurnPipeline
 
@@ -75,6 +75,7 @@ class SessionManager:
         self.database = Database(config.paths.database_path)
         self.database.initialize()
         self.session_store = SessionStore(self.database)
+        self.story_service = StoryService(self.database)
         self._role_cache: dict[str, RolePackage] = {}
         self._sessions: dict[str, SessionState] = {}
 
@@ -151,7 +152,7 @@ class SessionManager:
             ],
         )
         self._persist_session_participants(session.session_id, roles)
-        self._persist_story_state(session.session_id, scenario, self._now())
+        self.story_service.create_story_state(session.session_id, scenario)
         self._record(
             session,
             "scenario_session_started",
@@ -182,98 +183,25 @@ class SessionManager:
 
     def get_story_state(self, session_id: str) -> dict[str, Any]:
         self.get_session(session_id)
-        row = self.database.fetch_one("select * from story_states where session_id = ?", (session_id,))
-        if row is None:
-            raise SessionNotFoundError(session_id)
-        state = json.loads(str(row["state_json"]))
-        recent_events = self._load_scene_events(session_id)
-        clues = list(state.get("clues", []))
-        return {
-            "sessionId": session_id,
-            "scenarioId": str(row["scenario_id"]),
-            "currentScene": str(row["current_scene"]),
-            "initialState": state.get("initialState", {}),
-            "currentState": state.get("currentState", state.get("initialState", {})),
-            "publicFacts": state.get("publicFacts", []),
-            "hiddenFacts": state.get("hiddenFacts", []),
-            "clues": clues,
-            "revealedClues": [clue for clue in clues if clue.get("status") == "revealed"],
-            "recentEvents": recent_events,
-        }
+        try:
+            return self.story_service.get_state(session_id)
+        except KeyError as error:
+            raise SessionNotFoundError(session_id) from error
 
     def append_story_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if not event_type.strip():
-            raise ValueError("event type is required")
-        self.get_session(session_id)
-        story_row = self.database.fetch_one("select * from story_states where session_id = ?", (session_id,))
-        if story_row is None:
-            raise SessionNotFoundError(session_id)
-        if not isinstance(payload, dict):
-            raise ValueError("event payload must be an object")
-
-        now = self._now()
-        event_id = uuid.uuid4().hex
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "select coalesce(max(ordinal), -1) + 1 as ordinal from scene_events where session_id = ?",
-                (session_id,),
-            ).fetchone()
-            ordinal = int(row["ordinal"])
-            connection.execute(
-                """
-                insert into scene_events (id, session_id, type, payload_json, created_at, ordinal)
-                values (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    session_id,
-                    event_type.strip(),
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                    now,
-                    ordinal,
-                ),
-            )
-
-        state = json.loads(str(story_row["state_json"]))
-        current_scene = str(story_row["current_scene"])
-        next_state, next_scene = self._apply_story_event_to_state(
-            state=state,
-            current_scene=current_scene,
-            event_id=event_id,
-            event_type=event_type.strip(),
-            payload=payload,
-        )
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                update story_states
-                set state_json = ?, current_scene = ?, updated_at = ?
-                where session_id = ?
-                """,
-                (
-                    json.dumps(next_state, ensure_ascii=False, sort_keys=True),
-                    next_scene,
-                    now,
-                    session_id,
-                ),
-            )
-        event = {
-            "eventId": event_id,
-            "sessionId": session_id,
-            "type": event_type.strip(),
-            "payload": payload,
-            "createdAt": now,
-            "ordinal": ordinal,
-        }
         session = self.get_session(session_id)
+        try:
+            event = self.story_service.append_event(session_id, event_type, payload)
+        except KeyError as error:
+            raise SessionNotFoundError(session_id) from error
         self._record(
             session,
             "scene_event",
             {
                 "session_id": session_id,
-                "event_id": event_id,
-                "event_type": event_type.strip(),
-                "ordinal": ordinal,
+                "event_id": event["eventId"],
+                "event_type": event["type"],
+                "ordinal": event["ordinal"],
             },
         )
         return event
@@ -776,111 +704,11 @@ class SessionManager:
                     (session_id, role.id, role.name, index, "active", "{}"),
                 )
 
-    def _persist_story_state(self, session_id: str, scenario: ScenarioPackage, now: str) -> None:
-        payload = {
-            "initialState": scenario.initial_state,
-            "currentState": scenario.initial_state,
-            "publicFacts": scenario.public_facts,
-            "hiddenFacts": scenario.hidden_facts,
-            "clues": scenario.clues,
-        }
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                insert into story_states (session_id, scenario_id, state_json, current_scene, created_at, updated_at)
-                values (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    scenario.id,
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                    scenario.initial_scene,
-                    now,
-                    now,
-                ),
-            )
-
-    def _apply_story_event_to_state(
-        self,
-        *,
-        state: dict[str, Any],
-        current_scene: str,
-        event_id: str,
-        event_type: str,
-        payload: dict[str, Any],
-    ) -> tuple[dict[str, Any], str]:
-        next_state = dict(state)
-        next_scene = current_scene
-        if isinstance(payload.get("currentScene"), str) and payload["currentScene"].strip():
-            next_scene = payload["currentScene"].strip()
-
-        current_state = dict(next_state.get("currentState") or next_state.get("initialState") or {})
-        state_patch = payload.get("statePatch")
-        if isinstance(state_patch, dict):
-            current_state.update(state_patch)
-        next_state["currentState"] = current_state
-
-        public_fact = payload.get("publicFact")
-        if isinstance(public_fact, dict):
-            facts = [dict(item) for item in next_state.get("publicFacts", []) if isinstance(item, dict)]
-            facts.append({**public_fact, "sourceEventId": event_id})
-            next_state["publicFacts"] = facts
-
-        if event_type == "clue_revealed":
-            clue_id = payload.get("clueId")
-            clues = []
-            for item in next_state.get("clues", []):
-                clue = dict(item) if isinstance(item, dict) else {"content": str(item)}
-                if clue_id is not None and clue.get("id") == clue_id:
-                    clue["status"] = "revealed"
-                    clue["sourceEventId"] = event_id
-                clues.append(clue)
-            next_state["clues"] = clues
-
-        return next_state, next_scene
-
-    def _load_scene_events(self, session_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self.database.fetch_all(
-            """
-            select id, session_id, type, payload_json, created_at, ordinal
-            from scene_events
-            where session_id = ?
-            order by ordinal desc
-            limit ?
-            """,
-            (session_id, limit),
-        )
-        events = [
-            {
-                "eventId": str(row["id"]),
-                "sessionId": str(row["session_id"]),
-                "type": str(row["type"]),
-                "payload": json.loads(str(row["payload_json"])),
-                "createdAt": str(row["created_at"]),
-                "ordinal": int(row["ordinal"]),
-            }
-            for row in rows
-        ]
-        return list(reversed(events))
-
     def _visible_story_context(self, session_id: str, *, speaker_id: str | None = None) -> dict[str, Any]:
-        state = self.get_story_state(session_id)
-        context = {
-            "currentScene": state["currentScene"],
-            "currentState": state["currentState"],
-            "publicFacts": state["publicFacts"],
-            "revealedClues": state["revealedClues"],
-            "recentEvents": state["recentEvents"],
-        }
-        if speaker_id:
-            context["visibleHiddenFacts"] = [
-                fact
-                for fact in state.get("hiddenFacts", [])
-                if isinstance(fact, dict)
-                and isinstance(fact.get("visibility"), list)
-                and speaker_id in fact["visibility"]
-            ]
-        return context
+        try:
+            return self.story_service.visible_context(session_id, speaker_id=speaker_id)
+        except KeyError as error:
+            raise SessionNotFoundError(session_id) from error
 
     def _persist_message(
         self,

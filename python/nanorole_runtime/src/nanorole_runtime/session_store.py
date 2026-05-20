@@ -96,10 +96,7 @@ class SessionStore:
         return self.get_session(session_id)
 
     def get_session(self, session_id: str) -> StoredSession:
-        row = self.database.fetch_one("select * from sessions where id = ? and status != 'deleted'", (session_id,))
-        if row is None:
-            raise KeyError(session_id)
-        return self._session_from_row(row, include_history=True)
+        return self._get_session(session_id, include_deleted=False)
 
     def list_sessions(self) -> list[StoredSession]:
         rows = self.database.fetch_all(
@@ -127,7 +124,7 @@ class SessionStore:
             """,
             (next_title, next_status, now, session_id),
         )
-        return self.get_session(session_id)
+        return self._get_session(session_id, include_deleted=True)
 
     def persist_message(
         self,
@@ -248,6 +245,15 @@ class SessionStore:
             }
             for row in rows
         ]
+
+    def _get_session(self, session_id: str, *, include_deleted: bool) -> StoredSession:
+        if include_deleted:
+            row = self.database.fetch_one("select * from sessions where id = ?", (session_id,))
+        else:
+            row = self.database.fetch_one("select * from sessions where id = ? and status != 'deleted'", (session_id,))
+        if row is None:
+            raise KeyError(session_id)
+        return self._session_from_row(row, include_history=True)
 
     def _session_from_row(self, row: Any, *, include_history: bool) -> StoredSession:
         session_id = str(row["id"])
